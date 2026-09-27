@@ -48,7 +48,8 @@ export class Sim {
     this.probes = [];
     this.ghosts = [];   // finished probes, kept for observer-mode retarded rendering
     this.rings = [];    // light fronts: {x,y,t0,maxR,kind,hue}
-    this.events = [];   // log
+    this.events = [];   // log (trimmed to the most recent 400)
+    this.eventSeq = 0;  // monotonically increasing id of the latest event
     this.lineages = [];
     this.civs = [];
     this.diag = Math.hypot(galaxy.W, galaxy.H);
@@ -146,7 +147,8 @@ export class Sim {
 
   // ---------------------------------------------------------------- helpers
   log(text, star, kind, hue) {
-    this.events.push({ t: this.t, text, x: star ? star.x : null, y: star ? star.y : null, sid: star ? star.id : -1, kind, hue });
+    this.eventSeq++;
+    this.events.push({ seq: this.eventSeq, t: this.t, text, x: star ? star.x : null, y: star ? star.y : null, sid: star ? star.id : -1, kind, hue });
     if (this.events.length > 400) this.events.splice(0, this.events.length - 400);
   }
 
@@ -314,6 +316,7 @@ export class Sim {
     this.stats.colonized++;
     this.rings.push({ x: s.x, y: s.y, t0: this.t, maxR: COMMS_R, kind: 'comm', hue: lin.feral ? 0 : lin.hue });
     this.checkContact(s);
+    this.noteFeral(lin, s);
     if (lin.feral && !lin.outbreakLogged && lin.colonies >= 5) {
       lin.outbreakLogged = true;
       if (this.t - this.lastFeralOutbreakLog > 1500) {
@@ -381,8 +384,16 @@ export class Sim {
     if (nl.feral && !old.feral) {
       this.rings.push({ x: s.x, y: s.y, t0: this.t, maxR: COMMS_R * 1.4, kind: 'alarm', hue: 0 });
       this.stats.defections = (this.stats.defections || 0) + 1;
+      this.noteFeral(nl, s);
     }
     this.checkExtinct(old);
+  }
+
+  noteFeral(lin, s) {
+    const civ = this.civs[lin.civ];
+    if (!lin.feral || civ.firstFeral) return;
+    civ.firstFeral = true;
+    this.log(`${civ.name}'s first feral strain: ${lin.name} at ${s.name} has drifted to cooperation ${lin.genome.coop.toFixed(2)} and turned on its neighbours.`, s, 'feral', 0);
   }
 
   checkExtinct(lin) {
@@ -585,7 +596,7 @@ export class Sim {
       }
       e.prevR = r;
       if (r > MAXR) {
-        if (e.killed > 1) this.log(`The ${e.s.name} supernova sterilised ${e.killed} colonised systems.`, e.s, 'sn', 30);
+        if (e.killed > 1) this.log(`The ${e.s.name} supernova sterilised ${e.killed} colonised systems.`, e.s, 'snreport', 30);
         this.activeSN.splice(i, 1);
       }
     }

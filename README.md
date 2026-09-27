@@ -25,6 +25,9 @@ Plain HTML + canvas + ES modules, no build step. Everything lives in `site/`.
 - **Hazards** — dust destroys probes in transit; O/B stars go supernova, and the blast front sterilises everything
   within ~45 ly as it expands at *c*, leaving enriched debris to be recolonised.
 
+Every stat, inspector field, tech track and map glyph has a tooltip with the rule and constants behind it
+(`site/js/glossary.js`). **Auto-pause** can stop the clock and fly the camera to chosen kinds of event.
+
 The simulation core (`site/js/sim.js`, `site/js/galaxy.js`) has no DOM dependencies and runs under Node for headless
 experiments. In the browser console, `probeAquarium.sim` exposes the live state and `probeAquarium.advance(years)`
 fast-forwards.
