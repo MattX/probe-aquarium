@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Probe Aquarium</title>
+<meta name="description" content="A simulation of self-replicating von Neumann probes spreading through a patch of a spiral galaxy, with light-speed communication, resource depletion, Dyson swarms, mutation and feral strains.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23050814'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%236cd3ff'/%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%236cd3ff' stroke-opacity='.5'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="topbar">
+  <div class="brand">Probe Aquarium</div>
+  <div class="clock"><span id="year">Year 0</span></div>
+  <button id="play" class="btn primary" title="Play / pause (Space)">❚❚</button>
+  <label class="speed" title="Simulation speed">
+    <input id="speed" type="range" min="0" max="100" value="50">
+    <span id="speedLabel">450 yr/s</span>
+  </label>
+  <select id="viewMode" title="Colour colonies by (V)"></select>
+  <div class="toggles">
+    <label title="Territory fields (T)"><input type="checkbox" id="tTerr" checked> Territory</label>
+    <label title="Probes in flight (P)"><input type="checkbox" id="tProbes" checked> Probes</label>
+    <label title="Routine lightspeed broadcasts (C)"><input type="checkbox" id="tComms" checked> Comms</label>
+  </div>
+  <button id="fitBtn" class="btn" title="Fit view (F)">Fit</button>
+  <button id="helpBtn" class="btn" title="What am I looking at? (H)">?</button>
+  <button id="panelBtn" class="btn" title="Toggle panel">☰</button>
+</div>
+
+<div id="observerBar" hidden>
+  <span>Viewing the galaxy as <b id="obsName"></b> sees it right now: every star as it was when its light left. Rings mark how old that light is.</span>
+  <button id="obsExit" class="btn">Exit light-cone view (Esc)</button>
+</div>
+
+<div id="tooltip" hidden></div>
+
+<aside id="panel">
+  <section id="inspectorSec" hidden>
+    <h2>Inspector <button class="btn tiny" id="inspClose" title="Deselect (Esc)">✕</button></h2>
+    <div id="inspector"><p class="muted">Click a star to inspect it.</p></div>
+  </section>
+  <section>
+    <h2>Region</h2>
+    <div class="stats" id="stats"></div>
+  </section>
+  <section>
+    <h2>Civilisations</h2>
+    <div id="civs"></div>
+  </section>
+  <section>
+    <h2>History</h2>
+    <div class="chartlabel">Colonised systems <span class="legend" id="chartLegend"></span></div>
+    <canvas id="chart1" class="chart" height="90"></canvas>
+    <div class="chartlabel"><span style="color:#6cb4ff">cooperation</span> · <span style="color:#ffc857">expansion drive</span> · <span style="color:#ff7a59">starlight captured</span> · <span style="color:#9ad0a0">matter left</span></div>
+    <canvas id="chart2" class="chart" height="80"></canvas>
+  </section>
+  <section>
+    <h2>Chronicle</h2>
+    <div id="log"></div>
+  </section>
+  <section>
+    <h2>New galaxy</h2>
+    <div class="settings">
+      <label>Seed <input id="sSeed" type="number" min="1" step="1"></label>
+      <label>Stars <input id="sStars" type="number" min="1000" max="14000" step="500"></label>
+      <label>Origins <input id="sOrigins" type="number" min="1" max="4" step="1"></label>
+      <label title="Probability that a replication introduces a copy error (reduced by Fidelity tech). Also drives slow value drift inside colonies.">Mutation <input id="sMut" type="number" min="0" max="0.5" step="0.01"></label>
+      <label title="Starting cruise speed as a fraction of c (Drive tech multiplies this)">Base speed (c) <input id="sSpeed" type="number" min="0.005" max="0.3" step="0.005"></label>
+      <label title="Multiplier on how often massive stars go supernova">Supernova rate <input id="sSN" type="number" min="0" max="5" step="0.25"></label>
+    </div>
+    <div class="row">
+      <button id="regen" class="btn primary">Generate</button>
+      <button id="randomSeed" class="btn">Random seed</button>
+    </div>
+    <p class="muted small">Settings are saved in the URL, so you can share a particular galaxy.</p>
+  </section>
+</aside>
+
+<div id="help" hidden>
+  <div class="helpcard">
+    <button class="btn close" id="helpClose">✕</button>
+    <h1>Probe Aquarium</h1>
+    <p>A patch of a spiral galaxy, a few thousand light-years across. One or more civilisations launch
+    self-replicating probes. Each probe that reaches an unclaimed star builds a seed factory, mines the
+    system, and eventually builds more probes.</p>
+    <h3>Nothing is instantaneous</h3>
+    <p>Every colony knows only what light has told it. When a colony launches a probe or is founded, it
+    broadcasts that fact at <i>c</i> (the faint rings). Neighbours that haven't heard yet may target the same star —
+    a <b>duplicate arrival</b>. Cooperative strains also follow a protocol: <i>the nearest colony you can see has the right of claim</i>.
+    Knowledge in this sim is never stored; it is computed from event times and distances, so every decision is made on
+    a genuinely out-of-date picture. Select a colony and press <b>“View from its light cone”</b> to see the galaxy exactly as that
+    colony perceives it: stars as they were, probes where they <i>appear</i> to be.</p>
+    <h3>Economy</h3>
+    <p>Colonies extract matter (richer in the metal-heavy inner galaxy and near nebulae), grow industry up to a cap set by
+    starlight, and split output between probes and a <b>Dyson swarm</b>. Swarms dim the star (it glows infrared instead) and
+    raise energy for industry and research. Once a colony has nowhere left to expand, it throttles mining and turns to computation.
+    Matter is finite: the region can be strip-mined.</p>
+    <h3>Research</h3>
+    <p>Each colony researches on its own; the first to reach a breakthrough (Drive, Range, Fabrication, Fidelity, Stellar Engineering)
+    broadcasts it. The bright ring is that news spreading at lightspeed — colonies upgrade only when it reaches them.
+    Big bright stars wrapped in swarms tend to become the research hubs.</p>
+    <h3>Drift, feral strains and hunters</h3>
+    <p>Replication is imperfect, and long-lived colony minds drift too. Each colony carries a <b>cooperation</b> and an
+    <b>expansion</b> gene. Low-cooperation strains start ignoring claims; below a threshold a strain goes <b style="color:#ff5a4a">feral</b>:
+    it pours everything into probes and attacks other colonies to take their infrastructure. Cooperative colonies that <i>see</i>
+    feral activity (with light lag) divert output into defences and <b>hunter probes</b> (white) that retake feral systems.
+    Fidelity research slows mutation.</p>
+    <h3>Hazards</h3>
+    <p>Dust lanes (dark patches) destroy probes in transit. Massive O/B stars go <b style="color:#ffb46a">supernova</b>; the blast front
+    travels at <i>c</i> and sterilises colonies within ~45 ly, leaving a remnant and freshly enriched matter that gets recolonised.</p>
+    <h3>Controls</h3>
+    <p class="keys"><b>Drag</b> pan · <b>Wheel/pinch</b> zoom · <b>Click</b> inspect · <b>Space</b> pause · <b>V</b> cycle colour mode ·
+    <b>T/P/C</b> toggle layers · <b>F</b> fit · <b>O</b> light-cone view of selection · <b>Esc</b> exit.
+    Tip: slow down to ~50–100 yr/s and zoom in to watch light-lag in action.</p>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
