@@ -14,20 +14,37 @@
 <div id="topbar">
   <div class="brand">Probe Aquarium</div>
   <div class="clock"><span id="year">Year 0</span></div>
-  <button id="play" class="btn primary" title="Play / pause (Space)">❚❚</button>
-  <label class="speed" title="Simulation speed">
+  <button id="play" class="btn primary">❚❚</button>
+  <label class="speed" id="speedWrap">
     <input id="speed" type="range" min="0" max="100" value="50">
     <span id="speedLabel">450 yr/s</span>
   </label>
-  <select id="viewMode" title="Colour colonies by (V)"></select>
-  <div class="toggles">
-    <label title="Territory fields (T)"><input type="checkbox" id="tTerr" checked> Territory</label>
-    <label title="Probes in flight (P)"><input type="checkbox" id="tProbes" checked> Probes</label>
-    <label title="Routine lightspeed broadcasts (C)"><input type="checkbox" id="tComms" checked> Comms</label>
+  <div class="menuwrap">
+    <button id="autoPauseBtn" class="btn">Auto-pause <span id="autoPauseState">off</span> ▾</button>
+    <div id="pauseMenu" class="menu" hidden>
+      <label class="master"><input type="checkbox" id="apOn"> Pause when these happen:</label>
+      <div id="apKinds"></div>
+      <hr>
+      <label><input type="checkbox" id="apFly" checked> Fly camera to the event</label>
+    </div>
   </div>
-  <button id="fitBtn" class="btn" title="Fit view (F)">Fit</button>
-  <button id="helpBtn" class="btn" title="What am I looking at? (H)">?</button>
-  <button id="panelBtn" class="btn" title="Toggle panel">☰</button>
+  <select id="viewMode"></select>
+  <div class="toggles">
+    <label><input type="checkbox" id="tTerr" checked> Territory</label>
+    <label><input type="checkbox" id="tProbes" checked> Probes</label>
+    <label><input type="checkbox" id="tComms" checked> Comms</label>
+  </div>
+  <button id="fitBtn" class="btn">Fit</button>
+  <button id="helpBtn" class="btn">?</button>
+  <button id="panelBtn" class="btn">☰</button>
+</div>
+
+<div id="eventBar" hidden>
+  <div><span class="evkind" id="evKind"></span> <span id="evText"></span></div>
+  <div class="row0">
+    <button id="evGo" class="btn primary">Continue (Space)</button>
+    <button id="evOff" class="btn">Stop auto-pausing</button>
+  </div>
 </div>
 
 <div id="observerBar" hidden>
@@ -39,7 +56,7 @@
 
 <aside id="panel">
   <section id="inspectorSec" hidden>
-    <h2>Inspector <button class="btn tiny" id="inspClose" title="Deselect (Esc)">✕</button></h2>
+    <h2>Inspector <button class="btn tiny" id="inspClose">✕</button></h2>
     <div id="inspector"><p class="muted">Click a star to inspect it.</p></div>
   </section>
   <section>
@@ -47,14 +64,19 @@
     <div class="stats" id="stats"></div>
   </section>
   <section>
+    <h2>Map legend</h2>
+    <div id="legend"></div>
+    <div id="modeLegend"></div>
+  </section>
+  <section>
     <h2>Civilisations</h2>
     <div id="civs"></div>
   </section>
   <section>
     <h2>History</h2>
-    <div class="chartlabel">Colonised systems <span class="legend" id="chartLegend"></span></div>
+    <div class="chartlabel" id="chart1Label">Colonised systems <span class="legend" id="chartLegend"></span></div>
     <canvas id="chart1" class="chart" height="90"></canvas>
-    <div class="chartlabel"><span style="color:#6cb4ff">cooperation</span> · <span style="color:#ffc857">expansion drive</span> · <span style="color:#ff7a59">starlight captured</span> · <span style="color:#9ad0a0">matter left</span></div>
+    <div class="chartlabel" id="chart2Label"><span style="color:#6cb4ff">cooperation</span> · <span style="color:#ffc857">expansion drive</span> · <span style="color:#ff7a59">starlight captured</span> · <span style="color:#9ad0a0">matter left</span></div>
     <canvas id="chart2" class="chart" height="80"></canvas>
   </section>
   <section>
@@ -67,15 +89,15 @@
       <label>Seed <input id="sSeed" type="number" min="1" step="1"></label>
       <label>Stars <input id="sStars" type="number" min="1000" max="14000" step="500"></label>
       <label>Origins <input id="sOrigins" type="number" min="1" max="4" step="1"></label>
-      <label title="Probability that a replication introduces a copy error (reduced by Fidelity tech). Also drives slow value drift inside colonies.">Mutation <input id="sMut" type="number" min="0" max="0.5" step="0.01"></label>
-      <label title="Starting cruise speed as a fraction of c (Drive tech multiplies this)">Base speed (c) <input id="sSpeed" type="number" min="0.005" max="0.3" step="0.005"></label>
-      <label title="Multiplier on how often massive stars go supernova">Supernova rate <input id="sSN" type="number" min="0" max="5" step="0.25"></label>
+      <label>Mutation <input id="sMut" type="number" min="0" max="0.5" step="0.01"></label>
+      <label>Base speed (c) <input id="sSpeed" type="number" min="0.005" max="0.3" step="0.005"></label>
+      <label>Supernova rate <input id="sSN" type="number" min="0" max="5" step="0.25"></label>
     </div>
     <div class="row">
       <button id="regen" class="btn primary">Generate</button>
       <button id="randomSeed" class="btn">Random seed</button>
     </div>
-    <p class="muted small">Settings are saved in the URL, so you can share a particular galaxy.</p>
+    <p class="muted small">Hover (or tap) any label for an explanation. Settings are saved in the URL, so you can share a particular galaxy.</p>
   </section>
 </aside>
 
@@ -115,6 +137,8 @@
     <p class="keys"><b>Drag</b> pan · <b>Wheel/pinch</b> zoom · <b>Click</b> inspect · <b>Space</b> pause · <b>V</b> cycle colour mode ·
     <b>T/P/C</b> toggle layers · <b>F</b> fit · <b>O</b> light-cone view of selection · <b>Esc</b> exit.
     Tip: slow down to ~50–100 yr/s and zoom in to watch light-lag in action.</p>
+    <p><b>Auto-pause</b> (top bar) stops the clock and flies the camera to events you choose — supernovae, feral outbreaks,
+    first contact and more. Hover or tap any underlined label, legend entry or tech name for what it models and the numbers behind it.</p>
   </div>
 </div>
 

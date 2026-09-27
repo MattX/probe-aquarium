@@ -1,6 +1,8 @@
 import { generateGalaxy, TYPES } from './galaxy.js';
 import { Sim, DEFAULT_PARAMS, TRACKS, roman } from './sim.js';
-import { Renderer, VIEW_MODES, hslToRgb, rgb } from './render.js';
+import { Renderer, VIEW_MODES, hslToRgb, rgb, ramp } from './render.js';
+import { TIPS, TECH_TIPS, VIEW_TIPS, LEGEND, EVENT_KINDS, DEFAULT_PAUSE_KINDS } from './glossary.js';
+import { initTips, refreshTip } from './tips.js';
 
 const DT = 10; // simulation years per step
 const $ = (id) => document.getElementById(id);
@@ -57,6 +59,7 @@ function updateInsets() {
   const hidden = document.body.classList.contains('panel-hidden');
   const narrow = window.innerWidth <= 820;
   const tb = $('topbar').getBoundingClientRect();
+  document.documentElement.style.setProperty('--topbar-bottom', tb.bottom + 'px');
   const pr = $('panel').getBoundingClientRect();
   renderer.inset = {
     top: tb.bottom,
@@ -83,9 +86,16 @@ function start(p) {
 // ------------------------------------------------------------ speed
 const speedFromSlider = (v) => Math.round(10 * Math.pow(2000, v / 100));
 function yearsPerSec() { return speedFromSlider(+$('speed').value); }
+const fmtRate = (y) => y >= 1000 ? (y / 1000).toFixed(y >= 10000 ? 0 : 1) + 'k' : String(Math.round(y));
 function updateSpeedLabel() {
   const y = yearsPerSec();
-  $('speedLabel').textContent = `${y >= 1000 ? (y / 1000).toFixed(y >= 10000 ? 0 : 1) + 'k' : y} yr/s`;
+  const lagging = playing && effRate > 0 && effRate < y * 0.8;
+  const el = $('speedLabel');
+  el.textContent = lagging ? `${fmtRate(y)} → ${fmtRate(effRate)} yr/s` : `${fmtRate(y)} yr/s`;
+  el.classList.toggle('lagging', lagging);
+  el.dataset.tip = lagging
+    ? `Requested ${fmt(y)} yr/s, but this machine is only managing about ${fmt(effRate)} yr/s.`
+    : TIPS.speed;
 }
 
 // ------------------------------------------------------------ main loop
@@ -98,11 +108,14 @@ function frame(now) {
     const t0 = performance.now();
     let steps = 0;
     while (acc >= DT) {
+      const seq = sim.eventSeq;
       sim.step(DT); acc -= DT; steps++;
       rateWindow.years += DT;
+      if (sim.eventSeq !== seq && checkAutoPause(seq)) { acc = 0; break; }
       if (performance.now() - t0 > 14) { acc = Math.min(acc, DT); break; }
     }
   }
+  if (camAnim) stepCamAnim(dtReal);
   if (now - rateWindow.t > 1000) { effRate = rateWindow.years / ((now - rateWindow.t) / 1000); rateWindow = { t: now, years: 0 }; }
   renderer.draw({
     viewMode, observer, selected, hover,
@@ -116,9 +129,8 @@ function frame(now) {
 // ------------------------------------------------------------ UI
 function updateUI(force) {
   if (!sim) return;
-  const lagging = playing && effRate > 0 && effRate < yearsPerSec() * 0.8;
-  $('year').textContent = `Year ${fmt(sim.t)}` + (lagging ? ` · ${fmt(effRate)} yr/s` : '');
-  $('year').title = lagging ? 'Your machine is running the simulation slower than requested' : '';
+  $('year').textContent = `Year ${fmt(sim.t)}`;
+  updateSpeedLabel();
 
   const st = sim.stats;
   const N = sim.stars.length;
@@ -126,22 +138,22 @@ function updateUI(force) {
   let linAlive = 0, feralLin = 0;
   for (const l of sim.lineages) if (l.colonies > 0) { linAlive++; if (l.feral) feralLin++; }
   const rows = [
-    ['Colonised systems', `${fmt(sim.colonyCount)} / ${fmt(N)} (${pct(sim.colonyCount / N)})`],
-    ['Probes in flight', fmt(sim.probes.length)],
-    ['Probes launched', fmt(st.launched)],
-    ['Duplicate arrivals', `${fmt(st.duplicates)} <span class="muted">(${fmt(st.rerouted)} rerouted)</span>`, 'Probes that arrived to find their target already taken. Most try to reroute to a nearby free star.'],
-    ['&nbsp;· from light lag', fmt(st.dupLag), 'Cooperative probes whose builder had not yet heard (at lightspeed) that someone else claimed the star.'],
-    ['&nbsp;· from claim-jumping', fmt(st.dupJump), 'Low-cooperation strains (coop < 0.5) that ignore heard claims and the nearest-colony protocol.'],
-    ['Lost in transit', fmt(st.lost), 'Destroyed by dust and interstellar debris'],
-    ['Living strains', `${fmt(linAlive)}`],
-    ['Feral systems', `${fmt(sim.feralColonies)} <span class="muted">(${feralLin} strains)</span>`, null, sim.feralColonies > 0 ? 'feral' : ''],
-    ['Conquests / repelled', `${fmt(st.conquests)} / ${fmt(st.repelled)}`],
-    ['Hunters sent / kills', `${fmt(st.huntersLaunched)} / ${fmt(st.huntKills)}`],
-    ['Supernovae / sterilised', `${fmt(st.supernovae)} / ${fmt(st.sterilized)}`],
-    ['Starlight captured', last ? pct(last.captured, 1) : '0%', 'Fraction of the region\'s total luminosity enclosed by Dyson swarms'],
-    ['Matter remaining', last ? pct(last.metals, 1) : '100%'],
+    ['Colonised systems', `${fmt(sim.colonyCount)} / ${fmt(N)} (${pct(sim.colonyCount / N)})`, 'colonised'],
+    ['Probes in flight', fmt(sim.probes.length), 'inFlight'],
+    ['Probes launched', fmt(st.launched), 'launched'],
+    ['Duplicate arrivals', `${fmt(st.duplicates)} <span class="muted">(${fmt(st.rerouted)} rerouted)</span>`, 'duplicates'],
+    ['&nbsp;· from light lag', fmt(st.dupLag), 'dupLag'],
+    ['&nbsp;· from claim-jumping', fmt(st.dupJump), 'dupJump'],
+    ['Lost in transit', fmt(st.lost), 'lost'],
+    ['Living strains', `${fmt(linAlive)}`, 'strains'],
+    ['Feral systems', `${fmt(sim.feralColonies)} <span class="muted">(${feralLin} strains)</span>`, 'feral', sim.feralColonies > 0 ? 'feral' : ''],
+    ['Conquests / repelled', `${fmt(st.conquests)} / ${fmt(st.repelled)}`, 'conquests'],
+    ['Hunters sent / kills', `${fmt(st.huntersLaunched)} / ${fmt(st.huntKills)}`, 'hunters'],
+    ['Supernovae / sterilised', `${fmt(st.supernovae)} / ${fmt(st.sterilized)}`, 'supernovae'],
+    ['Starlight captured', last ? pct(last.captured, 1) : '0%', 'captured'],
+    ['Matter remaining', last ? pct(last.metals, 1) : '100%', 'matter'],
   ];
-  $('stats').innerHTML = rows.map(([k, v, tip, cls]) => `<div class="k"${tip ? ` title="${tip}"` : ''}>${k}</div><div class="v ${cls || ''}">${v}</div>`).join('');
+  $('stats').innerHTML = rows.map(([k, v, tip, cls]) => `<div class="k"${tip ? ` data-tip="${attr(TIPS[tip])}"` : ''}>${k}</div><div class="v ${cls || ''}">${v}</div>`).join('');
 
   // civs
   const civN = sim.civs.map(() => ({ ok: 0, feral: 0 }));
@@ -152,9 +164,9 @@ function updateUI(force) {
     const col = rgb(hslToRgb(c.hue, 0.8, 0.58));
     const status = !c.started ? `<span class="muted">awakens in ${fmt(c.tStart - sim.t)} yr</span>` :
       `${fmt(civN[i].ok)}${civN[i].feral ? ` <span style="color:var(--feral)">+${fmt(civN[i].feral)} feral</span>` : ''}`;
-    const tech = TRACKS.map((tn, k) => `${tn.split(' ')[0].slice(0, 5)} ${roman(c.maxLevel[k])}`).join(' · ');
+    const tech = TRACKS.map((tn, k) => `<span data-tip="${attr(TECH_TIPS[k] + '<br><br>' + TIPS.civTech)}">${tn.split(' ')[0].slice(0, 5)} ${roman(c.maxLevel[k])}</span>`).join(' · ');
     return `<div class="civ"><div class="sw" style="background:${col}"></div><div class="nm">${c.name}</div><div class="n">${status}</div>
-      <div class="tech" title="Best tech discovered anywhere in this civilisation (not all colonies know it yet)">${tech}</div></div>`;
+      <div class="tech">${tech}</div></div>`;
   }).join('');
   $('chartLegend').innerHTML = sim.civs.map((c) => `<span style="color:${rgb(hslToRgb(c.hue, 0.8, 0.6))}">${c.name}</span>`).join('') +
     `<span style="color:var(--feral)">feral</span>`;
@@ -162,7 +174,11 @@ function updateUI(force) {
   drawCharts();
   renderLog(force);
   if (selected) renderInspector();
+  refreshTip();
 }
+
+const attr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+const tipAttr = (key) => ` data-tip="${attr(TIPS[key])}"`;
 
 function drawCharts() {
   const s = sim.series;
@@ -246,11 +262,11 @@ function renderInspector() {
   let h = `<div class="title">${s.name}</div>
     <div class="sub">${T.label}${s.snType ? ` (was ${TYPES[s.snType].label}, exploded year ${fmt(s.snAt)})` : ''} · L ${s.lum < 0.1 ? s.lum.toFixed(3) : s.lum.toFixed(s.lum < 10 ? 2 : 0)} L☉</div>`;
   h += `<div class="stats">
-    <div class="k">Matter remaining</div><div class="v">${fmt(s.metals)} <span class="muted">/ ${fmt(s.M0)}</span></div></div>${bar(s.metals / s.M0, '#9ad0a0')}`;
-  h += `<div class="stats"><div class="k">Metallicity</div><div class="v">${s.Z.toFixed(2)}</div>
-    <div class="k">Energy factor</div><div class="v">${s.energy.toFixed(2)}${s.owner >= 0 ? ` → ${sim.effEnergy(s).toFixed(1)} with swarm` : ''}</div>`;
-  if (s.hazardUntil > t) h += `<div class="k">Irradiated</div><div class="v feral">${fmt(s.hazardUntil - t)} yr left</div>`;
-  if ((s.type === 'O' || s.type === 'B')) h += `<div class="k">Lifetime</div><div class="v">short — massive star</div>`;
+    <div class="k"${tipAttr('iMatter')}>Matter remaining</div><div class="v">${fmt(s.metals)} <span class="muted">/ ${fmt(s.M0)}</span></div></div>${bar(s.metals / s.M0, '#9ad0a0')}`;
+  h += `<div class="stats"><div class="k"${tipAttr('iZ')}>Metallicity</div><div class="v">${s.Z.toFixed(2)}</div>
+    <div class="k"${tipAttr('iEnergy')}>Energy factor</div><div class="v">${s.energy.toFixed(2)}${s.owner >= 0 ? ` → ${sim.effEnergy(s).toFixed(1)} with swarm` : ''}</div>`;
+  if (s.hazardUntil > t) h += `<div class="k"${tipAttr('iIrradiated')}>Irradiated</div><div class="v feral">${fmt(s.hazardUntil - t)} yr left</div>`;
+  if ((s.type === 'O' || s.type === 'B')) h += `<div class="k"${tipAttr('iLifetime')}>Lifetime</div><div class="v">short — massive star</div>`;
   h += `</div>`;
   const incoming = sim.probes.filter((p) => p.to === s.id);
   if (s.owner >= 0) {
@@ -261,33 +277,33 @@ function renderInspector() {
     const dOrigin = Math.hypot(origin.x - s.x, origin.y - s.y);
     const thr = sim.researchThreshold(s.tech);
     h += `<div class="row"><b style="color:${col}">${lin.feral ? 'FERAL ' : ''}strain ${lin.name}</b> <span class="muted">· ${civ.name}</span></div>
-      <div class="row"><span class="gene" title="Cooperation: respects claims, shares, defends. Below ${0.2} = feral.">coop ${s.genome.coop.toFixed(2)}</span><span class="gene" title="Share of output devoted to probes when targets exist">expand ${s.genome.expand.toFixed(2)}</span></div>
+      <div class="row"><span class="gene"${tipAttr('iCoop')}>coop ${s.genome.coop.toFixed(2)}</span><span class="gene"${tipAttr('iExpand')}>expand ${s.genome.expand.toFixed(2)}</span></div>
       <div class="stats" style="margin-top:6px">
-      <div class="k">Founded</div><div class="v">year ${fmt(s.colonizedAt)} <span class="muted">(${fmt(t - s.colonizedAt)} yr ago)</span></div>
-      <div class="k">Industry</div><div class="v">${s.I.toFixed(1)} <span class="muted">/ ${sim.industryCap(s).toFixed(0)} t·yr⁻¹</span></div>
-      <div class="k">Probes launched</div><div class="v">${fmt(s.launched)}</div>
-      <div class="k">Status</div><div class="v">${lin.feral ? '<span style="color:var(--feral)">raiding</span>' : s.metals < 1 ? '<span class="muted">exhausted — no matter left</span>' : s.alert > 0 ? `<span style="color:#ffb46a">on alert — sees ${s.alert} feral system${s.alert > 1 ? 's' : ''}</span>` : s.noTargets ? (s.dyson >= 1 ? 'computing (idle)' : 'building swarm') : 'expanding'}</div>
-      <div class="k">Probe range / speed</div><div class="v">${sim.rangeOf(s.tech).toFixed(0)} ly / ${sim.speedOf(s.tech).toFixed(3)} c</div>
-      <div class="k">Origin (${origin.name})</div><div class="v">${fmt(dOrigin)} ly — news ${fmt(dOrigin)} yr old</div>
+      <div class="k"${tipAttr('iFounded')}>Founded</div><div class="v">year ${fmt(s.colonizedAt)} <span class="muted">(${fmt(t - s.colonizedAt)} yr ago)</span></div>
+      <div class="k"${tipAttr('iIndustry')}>Industry</div><div class="v">${s.I.toFixed(1)} <span class="muted">/ ${sim.industryCap(s).toFixed(0)} t·yr⁻¹</span></div>
+      <div class="k"${tipAttr('iLaunched')}>Probes launched</div><div class="v">${fmt(s.launched)}</div>
+      <div class="k"${tipAttr('iStatus')}>Status</div><div class="v">${lin.feral ? '<span style="color:var(--feral)">raiding</span>' : s.metals < 1 ? '<span class="muted">exhausted — no matter left</span>' : s.alert > 0 ? `<span style="color:#ffb46a">on alert — sees ${s.alert} feral system${s.alert > 1 ? 's' : ''}</span>` : s.noTargets ? (s.dyson >= 1 ? 'computing (idle)' : 'building swarm') : 'expanding'}</div>
+      <div class="k"${tipAttr('iRange')}>Probe range / speed</div><div class="v">${sim.rangeOf(s.tech).toFixed(0)} ly / ${sim.speedOf(s.tech).toFixed(3)} c</div>
+      <div class="k"${tipAttr('iOrigin')}>Origin (${origin.name})</div><div class="v">${fmt(dOrigin)} ly — news ${fmt(dOrigin)} yr old</div>
       </div>
-      <div class="k muted small" style="margin-top:6px">Dyson swarm ${pct(s.dyson)}</div>${bar(s.dyson, '#ff7a59')}`;
-    if (!lin.feral) h += `<div class="k muted small">Research toward next breakthrough (${s.discoveries} made here)</div>${bar(s.research / thr, '#6cb4ff')}`;
-    h += `<div class="muted small">Known tech: ${TRACKS.map((n, k) => `${n} ${roman(s.tech[k])}`).join(', ')}</div>`;
+      <div class="k muted small"${tipAttr('iDyson')} style="margin-top:6px">Dyson swarm ${pct(s.dyson)}</div>${bar(s.dyson, '#ff7a59')}`;
+    if (!lin.feral) h += `<div class="k muted small"${tipAttr('iResearch')}>Research toward next breakthrough (${s.discoveries} made here)</div>${bar(s.research / thr, '#6cb4ff')}`;
+    h += `<div class="muted small"><span${tipAttr('iTech')}>Known tech:</span> ${TRACKS.map((n, k) => `<span data-tip="${attr(TECH_TIPS[k])}">${n} ${roman(s.tech[k])}</span>`).join(', ')}</div>`;
   } else {
     const ownerNow = s.history.length ? s.history[s.history.length - 1] : null;
     h += `<div class="row muted">Unclaimed${ownerNow && ownerNow.lin === -1 ? ' (previously colonised)' : ''}.</div>`;
   }
   if (incoming.length) {
-    h += `<div class="row small">Incoming: ${incoming.slice(0, 6).map((p) => {
+    h += `<div class="row small"><span${tipAttr('iIncoming')}>Incoming:</span> ${incoming.slice(0, 6).map((p) => {
       const l = sim.lineages[p.lin];
       const c = p.kind === 'hunter' ? '#eef' : l.feral ? 'var(--feral)' : rgb(hslToRgb(l.hue, 0.75, 0.6));
       return `<span style="color:${c}">${p.kind === 'hunter' ? 'hunter' : l.feral ? 'feral' : 'seed'} (${fmt(p.t1 - t)} yr)</span>`;
     }).join(', ')}${incoming.length > 6 ? '…' : ''}</div>`;
   }
   if (s.history.length) {
-    h += `<div class="row small muted">History: ${s.history.slice(-5).map((e) => `${fmt(e.t)}: ${e.lin < 0 ? 'emptied' : (sim.lineages[e.lin].feral ? 'feral ' : '') + sim.lineages[e.lin].name}`).join(' → ')}</div>`;
+    h += `<div class="row small muted"><span${tipAttr('iHistory')}>History:</span> ${s.history.slice(-5).map((e) => `${fmt(e.t)}: ${e.lin < 0 ? 'emptied' : (sim.lineages[e.lin].feral ? 'feral ' : '') + sim.lineages[e.lin].name}`).join(' → ')}</div>`;
   }
-  h += `<div class="row"><button class="btn primary" id="obsBtn">${observer === s ? 'Exit light-cone view' : 'View from its light cone'}</button>
+  h += `<div class="row"><button class="btn primary" id="obsBtn"${tipAttr('iObserve')}>${observer === s ? 'Exit light-cone view' : 'View from its light cone'}</button>
     <button class="btn" id="centerBtn">Center</button></div>`;
   el.innerHTML = h;
   $('obsBtn').onclick = () => setObserver(observer === s ? null : s);
@@ -308,6 +324,7 @@ let dragStart = null, pinchDist = 0, moved = false;
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  camAnim = null;
   if (pointers.size === 1) { dragStart = { x: e.clientX, y: e.clientY, cx: renderer.cam.x, cy: renderer.cam.y }; moved = false; }
   if (pointers.size === 2) {
     const [a, b] = [...pointers.values()];
@@ -366,12 +383,128 @@ canvas.addEventListener('pointercancel', endPointer);
 canvas.addEventListener('pointerleave', () => { hover = null; $('tooltip').hidden = true; });
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
+  camAnim = null;
   renderer.zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0015)));
 }, { passive: false });
 
-function togglePlay() {
-  playing = !playing;
+function setPlaying(p) {
+  playing = p;
   $('play').textContent = playing ? '❚❚' : '▶';
+  if (playing) $('eventBar').hidden = true;
+}
+function togglePlay() { setPlaying(!playing); }
+
+// ------------------------------------------------------------ auto-pause on events
+const PREFS_KEY = 'probe-aquarium-autopause';
+let pausePrefs = { on: false, kinds: [...DEFAULT_PAUSE_KINDS], fly: true };
+try { Object.assign(pausePrefs, JSON.parse(localStorage.getItem(PREFS_KEY) || '{}')); } catch { /* storage unavailable */ }
+function savePausePrefs() {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(pausePrefs)); } catch { /* storage unavailable */ }
+  $('autoPauseState').textContent = pausePrefs.on ? 'on' : 'off';
+  $('autoPauseBtn').classList.toggle('on', pausePrefs.on);
+}
+function buildPauseMenu() {
+  $('apKinds').innerHTML = Object.entries(EVENT_KINDS).map(([k, label]) =>
+    `<label><input type="checkbox" data-kind="${k}"${pausePrefs.kinds.includes(k) ? ' checked' : ''}> ${label}</label>`).join('');
+  $('apOn').checked = pausePrefs.on;
+  $('apFly').checked = pausePrefs.fly;
+  savePausePrefs();
+}
+$('autoPauseBtn').onclick = (e) => { e.stopPropagation(); $('pauseMenu').hidden = !$('pauseMenu').hidden; };
+$('pauseMenu').addEventListener('click', (e) => e.stopPropagation());
+document.addEventListener('click', () => { $('pauseMenu').hidden = true; });
+$('pauseMenu').addEventListener('change', (e) => {
+  const k = e.target.dataset.kind;
+  if (k) {
+    pausePrefs.kinds = pausePrefs.kinds.filter((x) => x !== k);
+    if (e.target.checked) { pausePrefs.kinds.push(k); pausePrefs.on = true; $('apOn').checked = true; }
+  } else if (e.target.id === 'apOn') pausePrefs.on = e.target.checked;
+  else if (e.target.id === 'apFly') pausePrefs.fly = e.target.checked;
+  savePausePrefs();
+});
+
+function checkAutoPause(prevSeq) {
+  if (!pausePrefs.on) return false;
+  const ev = sim.events.find((e) => e.seq > prevSeq && pausePrefs.kinds.includes(e.kind));
+  if (!ev) return false;
+  setPlaying(false);
+  $('evKind').textContent = EVENT_KINDS[ev.kind] || ev.kind;
+  $('evText').textContent = `Year ${fmt(ev.t)} — ${ev.text}`;
+  $('eventBar').hidden = false;
+  if (ev.sid >= 0) { selected = sim.stars[ev.sid]; renderInspector(); $('panel').scrollTop = 0; }
+  if (pausePrefs.fly && ev.x != null) {
+    const vis = Math.min(renderer.w - renderer.inset.right, renderer.h - renderer.inset.top - renderer.inset.bottom);
+    flyTo(ev.x, ev.y, Math.max(renderer.cam.scale, Math.min(3, vis / (ev.kind === 'sn' ? 260 : 360))));
+  }
+  updateUI(true);
+  return true;
+}
+$('evGo').onclick = () => setPlaying(true);
+$('evOff').onclick = () => { pausePrefs.on = false; $('apOn').checked = false; savePausePrefs(); setPlaying(true); };
+
+// Smooth camera flights. The target point is placed in the middle of the uncovered view.
+let camAnim = null;
+function flyTo(x, y, scale) {
+  const I = renderer.inset;
+  const cx = (I.left + renderer.w - I.right) / 2, cy = (I.top + renderer.h - I.bottom) / 2;
+  camAnim = { x: x + (renderer.w / 2 - cx) / scale, y: y + (renderer.h / 2 - cy) / scale, scale };
+}
+function stepCamAnim(dt) {
+  const c = renderer.cam, a = camAnim;
+  const k = 1 - Math.exp(-dt * 5);
+  c.x += (a.x - c.x) * k; c.y += (a.y - c.y) * k;
+  c.scale *= Math.pow(a.scale / c.scale, k);
+  if (Math.abs(a.x - c.x) * c.scale < 0.5 && Math.abs(a.y - c.y) * c.scale < 0.5 && Math.abs(a.scale / c.scale - 1) < 0.002) camAnim = null;
+}
+
+// ------------------------------------------------------------ legend + static tips
+const GLYPHS = {
+  star: '<circle cx="8" cy="8" r="6" fill="url(#gg)"/><circle cx="8" cy="8" r="2" fill="#fff4e0"/>',
+  colony: '<circle cx="8" cy="8" r="5" fill="none" stroke="#5fd0ea" stroke-width="1.3"/><circle cx="8" cy="8" r="1.4" fill="#ffb07a"/>',
+  feral: '<circle cx="8" cy="8" r="4" fill="none" stroke="#ff3c32" stroke-width="1.4"/><path d="M1 8h3M12 8h3M8 1v3M8 12v3" stroke="#ff3c32" stroke-width="1.4"/>',
+  probe: '<path d="M1 13L12 4" stroke="#5fd0ea" stroke-opacity=".35"/><rect x="11" y="3" width="2.5" height="2.5" fill="#bff"/>',
+  comm: '<circle cx="8" cy="8" r="6" fill="none" stroke="#9ec9e8" stroke-opacity=".45"/>',
+  tech: '<circle cx="8" cy="8" r="6" fill="none" stroke="#8ae8ff" stroke-width="1.8"/>',
+  alarm: '<circle cx="8" cy="8" r="6" fill="none" stroke="#ff3c32" stroke-width="1.4"/>',
+  sn: '<circle cx="8" cy="8" r="6" fill="none" stroke="#ffb464" stroke-width="2.2"/><circle cx="8" cy="8" r="2.5" fill="#ffc890"/>',
+  ir: '<circle cx="8" cy="8" r="6" fill="url(#gi)"/><circle cx="8" cy="8" r="1.6" fill="#8a3a2a"/>',
+  dust: '<circle cx="6" cy="9" r="6" fill="#d0507a" fill-opacity=".35"/><ellipse cx="10" cy="7" rx="5" ry="3" fill="#050302"/>',
+};
+const GLYPH_DEFS = '<defs><radialGradient id="gg"><stop offset="0" stop-color="#cfe0ff"/><stop offset="1" stop-color="#cfe0ff" stop-opacity="0"/></radialGradient>' +
+  '<radialGradient id="gi"><stop offset="0" stop-color="#ff5a32" stop-opacity=".8"/><stop offset="1" stop-color="#ff5a32" stop-opacity="0"/></radialGradient></defs>';
+function buildLegend() {
+  $('legend').innerHTML = LEGEND.map(([g, label, tip]) =>
+    `<div class="li" data-tip="${attr(tip)}"><svg width="16" height="16" viewBox="0 0 16 16">${GLYPH_DEFS}${GLYPHS[g]}</svg>${label}</div>`).join('');
+}
+function renderModeLegend() {
+  const el = $('modeLegend');
+  const tip = VIEW_TIPS[viewMode];
+  let bar = '';
+  if (viewMode === 'coop') {
+    const stops = [0, 0.25, 0.5, 0.75, 1].map((c) => rgb(hslToRgb(c * 215, 0.85, 0.55))).join(',');
+    bar = `<div class="ramp" style="background:linear-gradient(90deg,${stops})"></div><div class="ends"><span>0 (feral &lt; 0.2)</span><span>1</span></div>`;
+  } else if (viewMode !== 'lineage' && viewMode !== 'civ') {
+    const stops = [0, 0.25, 0.5, 0.75, 1].map((c) => rgb(ramp(c))).join(',');
+    const ends = { expand: ['0', '1'], tech: ['0 levels', '50'], age: ['old', 'new'], dyson: ['0%', '100%'], matter: ['mined out', 'untouched'] }[viewMode];
+    bar = `<div class="ramp" style="background:linear-gradient(90deg,${stops})"></div><div class="ends"><span>${ends[0]}</span><span>${ends[1]}</span></div>`;
+  }
+  el.innerHTML = `<div data-tip="${attr(tip)}"><b style="color:#c4cbe0">Colour mode: ${VIEW_MODES[viewMode]}</b> — ${tip}</div>${bar}`;
+  $('viewMode').dataset.tip = TIPS.viewMode + '<br><br>' + tip;
+}
+function applyStaticTips() {
+  const byId = {
+    play: 'play', speedWrap: 'speed', tTerr: 'tTerr', tProbes: 'tProbes', tComms: 'tComms', fitBtn: 'fit',
+    helpBtn: 'help', panelBtn: 'panel', autoPauseBtn: 'autoPause', chart1Label: 'chart1', chart2Label: 'chart2',
+    chart1: 'chart1', chart2: 'chart2',
+  };
+  for (const [id, key] of Object.entries(byId)) {
+    const el = $(id);
+    const target = el.tagName === 'INPUT' && el.type === 'checkbox' ? el.closest('label') : el;
+    target.dataset.tip = TIPS[key];
+  }
+  for (const id of ['sSeed', 'sStars', 'sOrigins', 'sMut', 'sSpeed', 'sSN']) $(id).closest('label').dataset.tip = TIPS[id];
+  $('inspClose').dataset.tip = 'Deselect <kbd>Esc</kbd>';
+  $('obsExit').dataset.tip = 'Back to the omniscient view <kbd>Esc</kbd>';
 }
 $('play').onclick = togglePlay;
 $('speed').oninput = updateSpeedLabel;
@@ -387,16 +520,18 @@ $('randomSeed').onclick = () => { $('sSeed').value = Math.floor(Math.random() * 
 for (const [k, v] of Object.entries(VIEW_MODES)) {
   const o = document.createElement('option'); o.value = k; o.textContent = v; $('viewMode').appendChild(o);
 }
-$('viewMode').onchange = () => { viewMode = $('viewMode').value; renderer.terrT = -1; };
+$('viewMode').onchange = () => { viewMode = $('viewMode').value; renderer.terrT = -1; renderModeLegend(); };
 
 window.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  // text fields keep their keys; sliders, checkboxes and buttons still get shortcuts
+  const tg = e.target;
+  if ((tg.tagName === 'INPUT' && tg.type !== 'range' && tg.type !== 'checkbox') || tg.tagName === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key.toLowerCase();
-  if (k === ' ') { e.preventDefault(); togglePlay(); }
+  if (k === ' ') { e.preventDefault(); if (tg.tagName === 'BUTTON' || tg.tagName === 'INPUT') tg.blur(); togglePlay(); }
   else if (k === 'v') {
     const keys = Object.keys(VIEW_MODES);
     viewMode = keys[(keys.indexOf(viewMode) + (e.shiftKey ? keys.length - 1 : 1)) % keys.length];
-    $('viewMode').value = viewMode; renderer.terrT = -1;
+    $('viewMode').value = viewMode; renderer.terrT = -1; renderModeLegend();
   }
   else if (k === 't') $('tTerr').click();
   else if (k === 'p') $('tProbes').click();
@@ -404,10 +539,11 @@ window.addEventListener('keydown', (e) => {
   else if (k === 'f') { updateInsets(); renderer.fit(); }
   else if (k === 'h' || k === '?') $('help').hidden = !$('help').hidden;
   else if (k === 'o' && selected) setObserver(observer === selected ? null : selected);
-  else if (k === 'escape') { if (!$('help').hidden) $('help').hidden = true; else if (observer) setObserver(null); else { selected = null; renderInspector(); } }
+  else if (k === 'escape') { if (!$('pauseMenu').hidden) $('pauseMenu').hidden = true; else if (!$('help').hidden) $('help').hidden = true; else if (observer) setObserver(null); else { selected = null; renderInspector(); } }
 });
 
 window.addEventListener('resize', () => { renderer.resize(); updateInsets(); });
+new ResizeObserver(() => updateInsets()).observe($('topbar'));
 window.addEventListener('hashchange', () => {
   const p = readParams();
   if (!sim || p.seed !== sim.p.seed || p.nStars !== sim.p.nStars || p.origins !== sim.p.origins ||
@@ -415,6 +551,11 @@ window.addEventListener('hashchange', () => {
 });
 
 // ------------------------------------------------------------ boot
+initTips();
+applyStaticTips();
+buildLegend();
+renderModeLegend();
+buildPauseMenu();
 renderer.resize();
 if (window.innerWidth <= 820) document.body.classList.add('panel-hidden');
 updateSpeedLabel();
