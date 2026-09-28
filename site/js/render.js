@@ -26,9 +26,10 @@ function ramp(x) {
 }
 
 export const VIEW_MODES = {
-  lineage: 'Strain (lineage)',
   civ: 'Civilisation',
-  coop: 'Cooperation gene',
+  lineage: 'Strain (lineage)',
+  loyalty: 'Loyalty gene',
+  aggr: 'Aggression gene',
   expand: 'Expansion drive',
   tech: 'Tech level',
   age: 'Colony age',
@@ -221,9 +222,14 @@ export class Renderer {
         if (!civ._rgb) civ._rgb = hslToRgb(civ.hue, 0.8, 0.58);
         return civ._rgb;
       }
-      case 'coop': {
-        const c = (ownerOverride != null ? lin.genome.coop : s.genome.coop);
+      case 'loyalty': {
+        const c = (ownerOverride != null ? lin.genome.loyalty : s.genome.loyalty);
         return hslToRgb(c * 215, 0.85, 0.55);
+      }
+      case 'aggr': {
+        const a = (ownerOverride != null ? lin.genome.aggr : s.genome.aggr);
+        if (lin.feral) return FERAL_RGB;
+        return hslToRgb(170 + a * 140, 0.8, 0.35 + a * 0.3);
       }
       case 'expand': return ramp(ownerOverride != null ? lin.genome.expand : s.genome.expand);
       case 'tech': {

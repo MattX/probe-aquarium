@@ -76,7 +76,7 @@
     <h2>History</h2>
     <div class="chartlabel" id="chart1Label">Colonised systems <span class="legend" id="chartLegend"></span></div>
     <canvas id="chart1" class="chart" height="90"></canvas>
-    <div class="chartlabel" id="chart2Label"><span style="color:#6cb4ff">cooperation</span> · <span style="color:#ffc857">expansion drive</span> · <span style="color:#ff7a59">starlight captured</span> · <span style="color:#9ad0a0">matter left</span></div>
+    <div class="chartlabel" id="chart2Label"><span style="color:#6cb4ff">loyalty</span> · <span style="color:#d27cff">aggression</span> · <span style="color:#ffc857">expansion</span> · <span style="color:#ff7a59">starlight captured</span> · <span style="color:#9ad0a0">unmined rock</span></div>
     <canvas id="chart2" class="chart" height="80"></canvas>
   </section>
   <section>
@@ -118,18 +118,26 @@
     <h3>Economy</h3>
     <p>Colonies extract matter (richer in the metal-heavy inner galaxy and near nebulae), grow industry up to a cap set by
     starlight, and split output between probes and a <b>Dyson swarm</b>. Swarms dim the star (it glows infrared instead) and
-    raise energy for industry and research. Once a colony has nowhere left to expand, it throttles mining and turns to computation.
-    Matter is finite: the region can be strip-mined.</p>
+    raise energy for industry and research. Once a colony has nowhere left to expand, it stops mining and turns to computation.
+    <b>Mass is conserved</b>: rock becomes infrastructure, swarms, defences and probes; wreckage falls back as rubble. Probes obey
+    the rocket equation, so speed costs propellant, and exhaust is the one real loss. When the rock runs out, hungry colonies
+    dismantle their own swarms.</p>
     <h3>Research</h3>
     <p>Each colony researches on its own; the first to reach a breakthrough (Drive, Range, Fabrication, Fidelity, Stellar Engineering)
     broadcasts it. The bright ring is that news spreading at lightspeed — colonies upgrade only when it reaches them.
     Big bright stars wrapped in swarms tend to become the research hubs.</p>
-    <h3>Drift, feral strains and hunters</h3>
-    <p>Replication is imperfect, and long-lived colony minds drift too. Each colony carries a <b>cooperation</b> and an
-    <b>expansion</b> gene. Low-cooperation strains start ignoring claims; below a threshold a strain goes <b style="color:#ff5a4a">feral</b>:
-    it pours everything into probes and attacks other colonies to take their infrastructure. Cooperative colonies that <i>see</i>
-    feral activity (with light lag) divert output into defences and <b>hunter probes</b> (white) that retake feral systems.
-    Fidelity research slows mutation.</p>
+    <h3>Drift, schisms, raiders and ferals</h3>
+    <p>Replication is imperfect, and long-lived colony minds drift too. Each colony carries four heritable traits:
+    <b>loyalty</b> (cohesion with its own civilisation), <b>aggression</b> (stance toward other civilisations),
+    <b>expansion</b> drive, and a protocol <b>dialect</b>.</p>
+    <p>Colonies keep their dialect in sync with the same-civ neighbours they can see, but isolated or peripheral regions drift
+    together. When a cluster can no longer parse its parent's broadcasts it <b>splinters</b> into a new civilisation with its own
+    name, colour, research and founding doctrine. Claims are only intelligible within a civilisation, so borders produce collisions.</p>
+    <p>Strains with aggression above 0.6 <b style="color:#d27cff">raid</b> other civilisations with heavy, slow-to-build warships.
+    Strains whose loyalty falls below 0.2 go <b style="color:#ff5a4a">feral</b>: they prey on everyone, never build swarms, and keep
+    their research to themselves. Any colony that <i>sees</i> hostility nearby (a feral system, or a recent conquest by another civ,
+    by the light that has reached it) arms up and sends white <b>hunter</b> warships to retake those systems. Fidelity research slows
+    all drift.</p>
     <h3>Hazards</h3>
     <p>Dust lanes (dark patches) destroy probes in transit. Massive O/B stars go <b style="color:#ffb46a">supernova</b>; the blast front
     travels at <i>c</i> and sterilises colonies within ~45 ly, leaving a remnant and freshly enriched matter that gets recolonised.</p>
