@@ -151,9 +151,21 @@ function updateUI(force) {
     ['Hunters sent / kills', `${fmt(st.huntersLaunched)} / ${fmt(st.huntKills)}`, 'hunters'],
     ['Supernovae / sterilised', `${fmt(st.supernovae)} / ${fmt(st.sterilized)}`, 'supernovae'],
     ['Starlight captured', last ? pct(last.captured, 1) : '0%', 'captured'],
-    ['Matter remaining', last ? pct(last.metals, 1) : '100%', 'matter'],
+    ['Unmined rock', last ? pct(last.metals, 1) : '100%', 'matter'],
   ];
-  $('stats').innerHTML = rows.map(([k, v, tip, cls]) => `<div class="k"${tip ? ` data-tip="${attr(TIPS[tip])}"` : ''}>${k}</div><div class="v ${cls || ''}">${v}</div>`).join('');
+  const L = sim.ledger || sim.massLedger();
+  const segs = [
+    ['raw', L.raw, '#5f8f66', 'Unmined rock and rubble'],
+    ['hardware', L.infra + L.stock + L.defense, '#6cb4ff', 'Colony hardware: infrastructure, stockpiles and defences'],
+    ['swarms', L.swarm, '#ff7a59', 'Dyson swarm hardware (including ruins)'],
+    ['in flight', L.flight, '#e8ecff', 'Probes in transit (payload + braking propellant)'],
+    ['exhaust', L.exhaust, '#8a8fa3', 'Expelled as rocket exhaust — gone from the region'],
+    ['lost', L.lost, '#4a4f63', 'Probes destroyed in transit'],
+  ];
+  const massBar = `<div class="massbar" data-tip="${attr(TIPS.massBar)}">${segs.map(([n, v, c]) =>
+    `<div style="width:${(100 * v / L.total).toFixed(2)}%;background:${c}"></div>`).join('')}</div>
+    <div class="masslegend">${segs.map(([n, v, c, tip]) => `<span data-tip="${attr(tip)}"><i style="background:${c}"></i>${n} ${pct(v / L.total, v / L.total < 0.1 ? 1 : 0)}</span>`).join('')}</div>`;
+  $('stats').innerHTML = rows.map(([k, v, tip, cls]) => `<div class="k"${tip ? ` data-tip="${attr(TIPS[tip])}"` : ''}>${k}</div><div class="v ${cls || ''}">${v}</div>`).join('') + `<div class="full">${massBar}</div>`;
 
   // civs
   const civN = sim.civs.map(() => ({ ok: 0, feral: 0 }));
@@ -262,7 +274,15 @@ function renderInspector() {
   let h = `<div class="title">${s.name}</div>
     <div class="sub">${T.label}${s.snType ? ` (was ${TYPES[s.snType].label}, exploded year ${fmt(s.snAt)})` : ''} · L ${s.lum < 0.1 ? s.lum.toFixed(3) : s.lum.toFixed(s.lum < 10 ? 2 : 0)} L☉</div>`;
   h += `<div class="stats">
-    <div class="k"${tipAttr('iMatter')}>Matter remaining</div><div class="v">${fmt(s.metals)} <span class="muted">/ ${fmt(s.M0)}</span></div></div>${bar(s.metals / s.M0, '#9ad0a0')}`;
+    <div class="k"${tipAttr('iMatter')}>Unmined rock</div><div class="v">${fmt(s.metals)} <span class="muted">/ ${fmt(s.M0)}</span></div></div>${bar(s.metals / s.M0, '#9ad0a0')}`;
+  if (s.infra + s.stock + s.defense + s.swarm > 0) {
+    h += `<div class="stats">
+      <div class="k"${tipAttr('iInfra')}>Infrastructure</div><div class="v">${fmt(s.infra)}</div>
+      <div class="k"${tipAttr('iStock')}>Stockpile</div><div class="v">${fmt(s.stock)}</div>
+      ${s.defense > 0 ? `<div class="k"${tipAttr('iDefense')}>Defences</div><div class="v">${fmt(s.defense)}</div>` : ''}
+      <div class="k"${tipAttr('iSwarm')}>Swarm hardware</div><div class="v">${fmt(s.swarm)} <span class="muted">/ ${fmt(sim.swarmNeed(s))}</span></div>
+      </div>`;
+  }
   h += `<div class="stats"><div class="k"${tipAttr('iZ')}>Metallicity</div><div class="v">${s.Z.toFixed(2)}</div>
     <div class="k"${tipAttr('iEnergy')}>Energy factor</div><div class="v">${s.energy.toFixed(2)}${s.owner >= 0 ? ` → ${sim.effEnergy(s).toFixed(1)} with swarm` : ''}</div>`;
   if (s.hazardUntil > t) h += `<div class="k"${tipAttr('iIrradiated')}>Irradiated</div><div class="v feral">${fmt(s.hazardUntil - t)} yr left</div>`;
@@ -280,10 +300,11 @@ function renderInspector() {
       <div class="row"><span class="gene"${tipAttr('iCoop')}>coop ${s.genome.coop.toFixed(2)}</span><span class="gene"${tipAttr('iExpand')}>expand ${s.genome.expand.toFixed(2)}</span></div>
       <div class="stats" style="margin-top:6px">
       <div class="k"${tipAttr('iFounded')}>Founded</div><div class="v">year ${fmt(s.colonizedAt)} <span class="muted">(${fmt(t - s.colonizedAt)} yr ago)</span></div>
-      <div class="k"${tipAttr('iIndustry')}>Industry</div><div class="v">${s.I.toFixed(1)} <span class="muted">/ ${sim.industryCap(s).toFixed(0)} t·yr⁻¹</span></div>
+      <div class="k"${tipAttr('iIndustry')}>Industry</div><div class="v">${s.I.toFixed(1)} <span class="muted">/ ${sim.industryCap(s).toFixed(0)} u/yr</span></div>
       <div class="k"${tipAttr('iLaunched')}>Probes launched</div><div class="v">${fmt(s.launched)}</div>
-      <div class="k"${tipAttr('iStatus')}>Status</div><div class="v">${lin.feral ? '<span style="color:var(--feral)">raiding</span>' : s.metals < 1 ? '<span class="muted">exhausted — no matter left</span>' : s.alert > 0 ? `<span style="color:#ffb46a">on alert — sees ${s.alert} feral system${s.alert > 1 ? 's' : ''}</span>` : s.noTargets ? (s.dyson >= 1 ? 'computing (idle)' : 'building swarm') : 'expanding'}</div>
-      <div class="k"${tipAttr('iRange')}>Probe range / speed</div><div class="v">${sim.rangeOf(s.tech).toFixed(0)} ly / ${sim.speedOf(s.tech).toFixed(3)} c</div>
+      <div class="k"${tipAttr('iStatus')}>Status</div><div class="v">${lin.feral ? '<span style="color:var(--feral)">raiding</span>' : s.metals < 1 && s.swarm < 1 ? '<span class="muted">exhausted — no matter left</span>' : s.alert > 0 ? `<span style="color:#ffb46a">on alert — sees ${s.alert} feral system${s.alert > 1 ? 's' : ''}</span>` : s.noTargets ? (s.dyson >= 1 ? 'computing (idle)' : 'building swarm') : 'expanding'}</div>
+      <div class="k"${tipAttr('iRange')}>Probe range / speed</div><div class="v">${sim.rangeOf(s.tech).toFixed(0)} ly / ${sim.cruiseSpeed(s.tech, s.genome.expand).toFixed(3)} c</div>
+      <div class="k"${tipAttr('iProbeCost')}>Probe cost</div><div class="v">${fmt(sim.probeCost(s.tech, s.genome.expand))} <span class="muted">(${fmt(sim.payloadOf(s.tech))} payload, ratio ${sim.massRatio(sim.cruiseSpeed(s.tech, s.genome.expand), s.tech).toFixed(1)})</span></div>
       <div class="k"${tipAttr('iOrigin')}>Origin (${origin.name})</div><div class="v">${fmt(dOrigin)} ly — news ${fmt(dOrigin)} yr old</div>
       </div>
       <div class="k muted small"${tipAttr('iDyson')} style="margin-top:6px">Dyson swarm ${pct(s.dyson)}</div>${bar(s.dyson, '#ff7a59')}`;

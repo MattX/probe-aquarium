@@ -1,9 +1,9 @@
 // Tooltip text explaining what the simulation models. Numbers mirror sim.js — keep in sync.
 
 export const TECH_TIPS = [
-  '<b>Drive</b> — probe cruise speed = base speed × 1.28<sup>level</sup>, capped at 0.5 c.',
+  '<b>Drive</b> — top speed = base speed × 1.28<sup>level</sup> (cap 0.5 c) and exhaust velocity = 0.08 c × 1.22<sup>level</sup> (cap 0.6 c). Faster exhaust means less propellant per probe.',
   '<b>Range</b> — longest hop a probe can make = 32 + 9 × level ly (hard cap 120 ly). Sparse inter-arm gaps can stall expansion until Range improves.',
-  '<b>Fabrication</b> — probe cost 600 t × 0.87<sup>level</sup> (min 80 t); industry grows 25% faster per level; hunters and feral raiders hit harder.',
+  '<b>Fabrication</b> — probe payload 300 u × 0.87<sup>level</sup> (min 40 u); industry grows 25% faster per level; hunters and feral raiders hit harder.',
   '<b>Fidelity</b> — error correction. Replication copy-error rate × 0.8<sup>level</sup>; slow value drift inside colonies × 0.85<sup>level</sup>.',
   '<b>Stellar Engineering</b> — Dyson swarm cost ÷ (1 + 0.3 × level); each level adds 25% to the energy a swarm yields.',
 ];
@@ -24,7 +24,7 @@ export const TIPS = {
   // region stats
   colonised: 'Star systems with an active colony of any strain, feral included.',
   inFlight: 'Probes currently in transit. Seed probes found colonies; white hunters attack feral systems; red probes are feral raiders.',
-  launched: 'Every probe ever built. Each costs 600 t of matter, less with Fabrication tech.',
+  launched: 'Every probe ever built. Each is a payload (the seed factory, 300 u, less with Fabrication) plus propellant from the rocket equation.',
   duplicates: 'Probes that arrived to find their target already taken. Most then try to reroute to a free star within 60% of their range; the rest are salvaged for half their mass.',
   dupLag: 'Cooperative probes whose builder had not yet heard (at lightspeed) that someone else had claimed or taken the star. The nearest-visible-colony protocol keeps this small.',
   dupJump: 'Probes from low-cooperation strains (coop < 0.5), which ignore heard claims with probability 1 − 2×coop and skip the nearest-colony protocol.',
@@ -35,14 +35,20 @@ export const TIPS = {
   hunters: 'Cooperative colonies that can see feral systems within 1.5× their probe range (by the light that has reached them) go on alert: they divert half their spare output to defences and build hunter probes. A successful hunt hands the system to the hunter\'s strain.',
   supernovae: 'Massive O-type (and some B-type) stars explode. The blast front travels at c, sterilises colonies within 45 ly and leaves systems irradiated for ~1,200 yr. Ejecta enrich matter up to 120 ly away.',
   captured: 'Fraction of the region\'s total starlight enclosed by Dyson swarms.',
-  matter: 'Mineable matter left across all systems, relative to everything that existed (including supernova enrichment).',
+  matter: 'Share of all matter still sitting as unmined rock or rubble. Mass is conserved: see the bar below for where the rest is.',
+  massBar: 'Where every unit of matter in the region is right now. Mass is conserved: mining moves rock into hardware and swarms; destroyed hardware falls back as rubble; the only losses are rocket exhaust and probes destroyed in transit, and the only source is supernova ejecta. Units are abstract "u".',
 
   civTech: 'Best level discovered anywhere in this civilisation. Individual colonies only learn of it when the light carrying the news reaches them.',
   chart1: 'Colonised systems over time, stacked by civilisation, with feral systems in red on top.',
-  chart2: 'Colony averages over time: cooperation and expansion genes, fraction of starlight captured, and fraction of matter left.',
+  chart2: 'Colony averages over time: cooperation and expansion genes, fraction of starlight captured, and share of matter still unmined.',
 
   // inspector
-  iMatter: 'Mineable mass in tonnes. The initial budget scales with spectral type, metallicity and nearby nebulae. Colonies extract at their industry rate; idle ones throttle to 2%.',
+  iMatter: 'Unmined rock plus rubble, in mass units. The initial amount scales with spectral type, metallicity and nearby nebulae. Colonies only mine what they have a use for (growth, probes, swarm, defences), up to their industry rate.',
+  iInfra: 'Mass locked into the colony\'s industrial base: 60 u per unit of industry, plus the seed factory it arrived as. Captured by conquerors (40% wrecked); becomes rubble if the colony dies.',
+  iStock: 'Refined matter waiting to become probes. Probes that arrive at a friendly system are absorbed here.',
+  iDefense: 'Defensive hardware, built while the colony can see hostile systems. Raises the odds of repelling attacks; each failed attack wrecks some of it.',
+  iSwarm: 'Mass of Dyson swarm hardware vs. what a complete swarm needs. Once the rock runs out, colonies that still need probes or defences dismantle their swarm for material.',
+  iProbeCost: 'Payload × mass ratio. Reaching cruise speed v and braking again needs R = e^(2v / v_exhaust) (the rocket equation). Drive tech raises both top speed and exhaust velocity; eager expanders accept a mass ratio up to 2 + 4 × expand to go faster.',
   iZ: 'Heavy-element abundance, relative to typical. Higher toward the galactic core (left edge) and near nebulae.',
   iEnergy: 'Usable power from the star, from its luminosity on a log scale. A full Dyson swarm multiplies it by 1 + 6 × (1 + 0.25 × Stellar level).',
   iIrradiated: 'Recently hit by a supernova blast. Probes arriving now are destroyed.',
@@ -50,12 +56,12 @@ export const TIPS = {
   iCoop: 'Cooperation gene (0–1). Probability of respecting a heard claim = min(1, 2 × coop). At ≥ 0.5 it follows the nearest-colony protocol; at ≥ 0.4 it watches for ferals; below 0.2 the strain is feral.',
   iExpand: 'Expansion gene (0–1). While targets exist, the share of output spent on probes is 0.30 + 0.65 × expand; the rest builds the Dyson swarm.',
   iFounded: 'When this colony was founded (or last changed hands).',
-  iIndustry: 'Extraction rate in tonnes per year. Grows logistically (0.35%/yr base, faster with Fabrication) toward a cap set by energy, swarm coverage and the system\'s mass.',
+  iIndustry: 'Maximum extraction rate in mass units per year. Grows logistically (0.35%/yr base, faster with Fabrication) toward a cap set by energy, swarm coverage and the system\'s mass — and every unit of growth must be built from 60 u of mined matter.',
   iLaunched: 'Probes this colony has built and launched.',
-  iStatus: '<b>expanding</b>: saving up for probes · <b>building swarm</b>: no targets left, all output to the Dyson swarm · <b>computing (idle)</b>: swarm done, mining throttled to 2%, research doubled · <b>on alert</b>: sees ferals nearby · <b>raiding</b>: feral · <b>exhausted</b>: no matter left.',
+  iStatus: '<b>expanding</b>: saving up for probes · <b>building swarm</b>: no targets left, all output to the Dyson swarm · <b>computing (idle)</b>: swarm done and nothing to build, so no mining; research doubled · <b>on alert</b>: sees ferals nearby · <b>raiding</b>: feral · <b>exhausted</b>: no matter left.',
   iRange: 'Longest hop and cruise speed of the probes this colony builds, from the tech it has heard of.',
   iOrigin: 'Light-travel distance to the civilisation\'s homeworld. Anything this colony knows about home is at least this many years out of date.',
-  iDyson: 'Fraction of the star enclosed. Cost 40,000 t × √(luminosity + 0.05), reduced by Stellar Engineering. Swarms dim the star (it re-radiates as infrared) and boost energy.',
+  iDyson: 'Fraction of the star enclosed. A full swarm needs 40,000 u × √(luminosity + 0.05) of hardware, less with Stellar Engineering. Swarms dim the star (it re-radiates as infrared) and boost energy.',
   iResearch: 'Accumulates from captured energy. At 1,500 × 1.3<sup>(total tech levels)</sup> the colony makes a breakthrough in its weakest track and broadcasts it at c. Big swarm-wrapped stars become research hubs.',
   iTech: 'Tech this colony knows about. Newer breakthroughs may still be on their way at lightspeed.',
   iHistory: 'Changes of ownership: founding, conquest, liberation by hunters, value drift into a new strain, or sterilisation.',

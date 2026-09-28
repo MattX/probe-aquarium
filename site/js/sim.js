@@ -9,6 +9,10 @@
 //    drive go feral and prey on other colonies. Cooperative colonies that see
 //    feral activity (with light lag) arm themselves and send hunter probes.
 //  * Massive stars go supernova, sterilising everything the blast front reaches.
+//  * Mass is conserved. Every system holds raw rock, a stockpile, infrastructure,
+//    Dyson swarm hardware and defences; probes carry their payload and braking
+//    propellant. The only sinks are rocket exhaust and probes lost in transit;
+//    the only source is supernova ejecta. See massLedger().
 import { RNG } from './rng.js';
 import { MAXR, TYPES, energyOfLum } from './galaxy.js';
 
@@ -26,8 +30,9 @@ const CIV_DEFS = [
 const FERAL_COOP = 0.2;     // below this a strain is feral
 const UNFERAL_COOP = 0.35;  // hysteresis to return
 const SN_KILL_R = 45;       // ly
-const COMMS_R = 110;
-const COLONY_STRIDE = 3;        // how far we bother drawing routine broadcast rings
+const COMMS_R = 110;         // how far we bother drawing routine broadcast rings
+const COLONY_STRIDE = 3;
+const INFRA_PER_I = 60;      // mass of infrastructure per unit of industry (t/yr)
 
 export const DEFAULT_PARAMS = {
   nStars: 5000,
@@ -58,6 +63,12 @@ export class Sim {
       launched: 0, duplicates: 0, dupLag: 0, dupJump: 0, rerouted: 0, lost: 0, conquests: 0, repelled: 0,
       huntersLaunched: 0, huntKills: 0, sterilized: 0, supernovae: 0, colonized: 0,
     };
+    // Mass ledger: initial + injected == held in systems + in flight + exhaust + lost
+    this.mass = { initial: 0, injected: 0, exhaust: 0, lost: 0 };
+    for (const s of this.stars) {
+      s.stock = 0; s.infra = 0; s.defense = 0; s.swarm = 0;
+      this.mass.initial += s.metals;
+    }
     this.colonyCount = 0;
     this.feralColonies = 0;
     this.series = [];
@@ -140,6 +151,9 @@ export class Sim {
     const lin = this.newLineage(civ.id, -1, genome);
     this.colonize(s, { lin: lin.id, civ: civ.id, genome, tech: [0, 0, 0, 0, 0] }, true);
     s.I = 6;
+    // the homeworld's starting industry is built out of its own rock
+    const m = Math.min(s.metals, s.I * INFRA_PER_I);
+    s.metals -= m; s.infra += m;
     s.isOrigin = true;
     this.log(`${civ.name} awakens at ${s.name}. The first seed factory spins up.`, s, 'origin', civ.hue);
     this.rings.push({ x: s.x, y: s.y, t0: this.t, maxR: this.diag, kind: 'origin', hue: civ.hue });
@@ -160,7 +174,35 @@ export class Sim {
 
   rangeOf(tech) { return Math.min(MAXR, 32 + 9 * tech[T_RANGE]); }
   speedOf(tech) { return Math.min(0.5, this.p.baseSpeed * Math.pow(1.28, tech[T_DRIVE])); }
-  probeCost(tech) { return Math.max(80, 600 * Math.pow(0.87, tech[T_FAB])); }
+  // Probes: a payload (the seed factory) plus propellant from the rocket equation.
+  // Accelerating to v and braking again needs a mass ratio R = exp(2v / v_exhaust).
+  payloadOf(tech) { return Math.max(40, 300 * Math.pow(0.87, tech[T_FAB])); }
+  exhaustVel(tech) { return Math.min(0.6, 0.08 * Math.pow(1.22, tech[T_DRIVE])); }
+  // Cruise speed: as fast as the drive allows, but a colony will only tolerate a mass
+  // ratio of 2 + 4 × expand — eager expanders burn more matter to get there sooner.
+  cruiseSpeed(tech, expand) {
+    return Math.min(this.speedOf(tech), this.exhaustVel(tech) * Math.log(2 + 4 * expand) / 2);
+  }
+  massRatio(v, tech) { return Math.exp(2 * v / this.exhaustVel(tech)); }
+  probeCost(tech, expand = 0.5) {
+    return this.payloadOf(tech) * this.massRatio(this.cruiseSpeed(tech, expand), tech);
+  }
+  defenseTarget(s) { return 1500 + 1200 * Math.min(s.alert, 6) + 20 * s.I; }
+  swarmNeed(s) { return 40000 * Math.sqrt(s.lum + 0.05) / (1 + 0.3 * (s.tech ? s.tech[T_STELLAR] : 0)); }
+  updateDyson(s) { s.dyson = s.swarm > 0 ? Math.min(1, s.swarm / this.swarmNeed(s)) : 0; }
+  // Everything held in a system except its untouched rock
+  heldMass(s) { return s.stock + s.infra + s.defense + s.swarm; }
+  // Rubble from destroyed hardware falls back into the mineable pool.
+  toRubble(s, m) { s.metals += m; }
+  massLedger() {
+    let held = 0, raw = 0, stock = 0, infra = 0, defense = 0, swarm = 0, flight = 0;
+    for (const s of this.stars) { raw += s.metals; stock += s.stock; infra += s.infra; defense += s.defense; swarm += s.swarm; }
+    for (const pr of this.probes) flight += pr.mass;
+    held = raw + stock + infra + defense + swarm;
+    const total = this.mass.initial + this.mass.injected;
+    return { total, raw, stock, infra, defense, swarm, flight, exhaust: this.mass.exhaust, lost: this.mass.lost,
+      error: total - (held + flight + this.mass.exhaust + this.mass.lost) };
+  }
   industryCap(s) {
     const st = s.tech ? s.tech[T_STELLAR] : 0;
     return 10 * s.energy * (1 + 4 * s.dyson * (1 + 0.25 * st)) * Math.min(2, Math.sqrt(s.M0 / 3e5) + 0.3);
@@ -296,8 +338,11 @@ export class Sim {
     s.genome = { ...probe.genome };
     s.tech = probe.tech.slice();
     s.I = isOrigin ? 6 : 1;
-    s.probeFund = 0;
-    s.defense = 0;
+    s.stock = 0;
+    // The probe's payload is the seed factory. Any swarm ruins left by a previous
+    // colony are inherited as-is.
+    s.infra += probe.payload ?? 0;
+    this.updateDyson(s);
     s.research = this.rng.next() * 50;
     s.colonizedAt = this.t;
     s.alert = 0;
@@ -335,7 +380,10 @@ export class Sim {
     this.colonyCount--;
     if (lin.feral) this.feralColonies--;
     s.history.push({ t: this.t, lin: -1 });
-    s.owner = -1; s.civ = -1; s.I = 0; s.probeFund = 0;
+    s.owner = -1; s.civ = -1; s.I = 0;
+    // abandoned hardware becomes rubble; swarm hardware stays in orbit as ruins
+    this.toRubble(s, s.stock + s.infra + s.defense);
+    s.stock = 0; s.infra = 0; s.defense = 0;
     this.checkExtinct(lin);
   }
 
@@ -348,7 +396,12 @@ export class Sim {
     s.owner = probe.lin; s.civ = probe.civ;
     s.genome = { ...probe.genome };
     s.tech = s.tech.map((v, i) => Math.max(v, probe.tech[i]));
-    s.research = 0; s.probeFund = 0; s.defense = 0; s.alert = 0;
+    s.research = 0; s.alert = 0;
+    // the captor inherits the stockpile, swarm and most infrastructure; the fighting
+    // wrecks half the defences and 40% of the industrial base
+    this.toRubble(s, s.defense * 0.5 + s.infra * 0.4);
+    s.defense *= 0.5; s.infra *= 0.6;
+    s.stock += probe.payload ?? 0;
     s.I *= 0.6;
     s.noTargets = false; s.flash = this.t; s.colonizedAt = this.t;
     s.history.push({ t: this.t, lin: probe.lin });
@@ -444,7 +497,14 @@ export class Sim {
       linId = this.speciate(civ, s.owner, genome);
     }
     const tech = s.tech.slice();
-    const speed = this.speedOf(tech);
+    const speed = this.cruiseSpeed(tech, s.genome.expand);
+    const payload = this.payloadOf(tech);
+    const R = this.massRatio(speed, tech);
+    const cost = payload * R;
+    s.stock -= cost;
+    // accelerating burns half the propellant (in log terms); the braking half rides along
+    const mass = payload * Math.sqrt(R);
+    this.mass.exhaust += cost - mass;
     const d = Math.hypot(target.x - s.x, target.y - s.y);
     const t1 = t + d / speed;
     // dust attenuation along the path
@@ -460,7 +520,7 @@ export class Sim {
     const pr = {
       id: this.nextProbeId++, lin: linId, civ, genome, tech, kind,
       from: s.id, to: target.id, x0: s.x, y0: s.y, x1: target.x, y1: target.y,
-      t0: t, t1, tDie, speed,
+      t0: t, t1, tDie, speed, payload, mass,
     };
     this.probes.push(pr);
     this.lineages[linId].probes++;
@@ -481,30 +541,31 @@ export class Sim {
     const s = this.stars[pr.to];
     const lin = this.lineages[pr.lin];
     const t = this.t;
-    if (s.hazardUntil > t) { this.stats.lost++; return; }
+    // braking burn: the remaining propellant is expelled on arrival
+    this.mass.exhaust += pr.mass - pr.payload;
+    pr.mass = pr.payload;
+    if (s.hazardUntil > t) { this.stats.lost++; this.toRubble(s, pr.payload); return; }
     if (pr.kind === 'hunter') {
       if (s.owner >= 0 && this.lineages[s.owner].feral) {
         const atk = 4 + 0.6 * pr.tech[T_FAB];
         const def = 1 + s.I * 0.04 + s.defense / 300;
         if (this.rng.next() < atk / (atk + def)) { this.transfer(s, pr); this.stats.huntKills++; }
-        else this.stats.repelled++;
+        else this.repel(s, pr);
       } else if (s.owner < 0) {
         this.colonize(s, pr);
-      } else if (s.civ === pr.civ) {
-        s.probeFund += this.probeCost(pr.tech) * 0.5;
-      }
+      } else this.salvage(s, pr);
       return;
     }
     if (lin.feral) {
       if (s.owner < 0) { this.colonize(s, pr); return; }
-      if (s.owner === pr.lin) { s.probeFund += this.probeCost(pr.tech) * 0.5; return; }
+      if (s.owner === pr.lin) { this.salvage(s, pr); return; }
       const atk = 3 + 0.3 * pr.tech[T_FAB];
       const tgtFeral = this.lineages[s.owner].feral;
       const def = 1 + s.defense / 250 + s.I * (tgtFeral ? 0.04 : 0.015);
       if (this.rng.next() < atk / (atk + def)) {
         this.stats.conquests++;
         this.transfer(s, pr);
-      } else this.stats.repelled++;
+      } else this.repel(s, pr);
       return;
     }
     // cooperative seed probe
@@ -519,14 +580,34 @@ export class Sim {
       this.stats.rerouted++;
       this.retire(pr, 'arrive');
       const d = Math.hypot(alt.x - s.x, alt.y - s.y);
-      const np = { ...pr, id: this.nextProbeId++, from: s.id, to: alt.id, x0: s.x, y0: s.y, x1: alt.x, y1: alt.y, t0: t, t1: t + d / pr.speed, tDie: Infinity, rerouted: true };
+      // The hop costs another full burn out of the payload itself, so rerouting shrinks the probe.
+      const R = this.massRatio(pr.speed, pr.tech);
+      const payload = pr.payload / R;
+      const mass = payload * Math.sqrt(R);
+      this.mass.exhaust += pr.payload - mass;
+      const np = { ...pr, id: this.nextProbeId++, from: s.id, to: alt.id, x0: s.x, y0: s.y, x1: alt.x, y1: alt.y, t0: t, t1: t + d / pr.speed, tDie: Infinity, rerouted: true, payload, mass };
       if (this.rng.next() > Math.exp(-0.0004 * d)) np.tDie = t + this.rng.next() * (np.t1 - t);
       this.probes.push(np);
       this.lineages[np.lin].probes++;
       alt.intents.push({ origin: s.id, t, eta: np.t1, kind: 'seed' });
       return 'rerouted';
     }
-    if (s.civ === pr.civ && !this.lineages[s.owner].feral) s.probeFund += this.probeCost(pr.tech) * 0.5;
+    this.salvage(s, pr);
+  }
+
+  // A probe that can't do anything useful where it arrived: a friendly colony absorbs it
+  // into its stockpile; anyone else's system just gets the wreck as rubble.
+  salvage(s, pr) {
+    if (s.owner >= 0 && s.civ === pr.civ && !this.lineages[s.owner].feral === !this.lineages[pr.lin].feral) s.stock += pr.payload;
+    else this.toRubble(s, pr.payload);
+  }
+
+  // Failed attack: the attacker is destroyed and takes some defences with it.
+  repel(s, pr) {
+    this.stats.repelled++;
+    const dmg = Math.min(s.defense, pr.payload * 0.5);
+    s.defense -= dmg;
+    this.toRubble(s, pr.payload + dmg);
   }
 
   // ---------------------------------------------------------------- tech
@@ -567,8 +648,10 @@ export class Sim {
     const oldType = s.type;
     s.snType = oldType; s.snLum = s.lum; s.snAt = this.t;
     s.type = 'N'; s.lum = TYPES.N.lum; s.energy = energyOfLum(s.lum);
-    s.metals += s.M0 * 0.5; s.M0 *= 1.5; // remnant debris
-    s.dyson = 0;
+    // ejecta from the star itself: the only place new matter enters the region
+    const ej = s.M0 * 0.5;
+    s.metals += ej; s.M0 += ej; this.mass.injected += ej;
+    this.toRubble(s, s.swarm); s.swarm = 0; s.dyson = 0;
     this.rings.push({ x: s.x, y: s.y, t0: this.t, maxR: this.diag, kind: 'sn', hue: 30 });
     this.activeSN.push({ s, t0: this.t, prevR: 0, killed: hadColony ? 1 : 0 });
     if (hadColony) { this.vacate(s); this.stats.sterilized++; }
@@ -589,10 +672,11 @@ export class Sim {
         if (d <= SN_KILL_R) {
           o.hazardUntil = Math.max(o.hazardUntil, this.t + 1200);
           if (o.owner >= 0) { this.vacate(o); this.stats.sterilized++; e.killed++; }
-          o.dyson *= 0.3;
+          // the blast shreds 70% of any swarm
+          this.toRubble(o, o.swarm * 0.7); o.swarm *= 0.3; this.updateDyson(o);
         }
         const add = o.M0 * 0.15 * Math.max(0, 1 - d / MAXR); // enrichment from ejecta
-        o.metals += add; o.M0 += add;
+        o.metals += add; o.M0 += add; this.mass.injected += add;
       }
       e.prevR = r;
       if (r > MAXR) {
@@ -614,42 +698,73 @@ export class Sim {
     const feral = lin.feral;
     if (t >= s.techT) { this.refreshTech(s); s.techT = t + 30 + this.rng.next() * 30; }
 
-    // Idle colonies (swarm finished, nowhere to expand, no threat) throttle down to maintenance
-    // and put their energy into computation instead.
-    const idle = !feral && s.noTargets && s.dyson >= 1 && s.alert === 0;
-    const extract = Math.min(s.I * dt * (idle ? 0.02 : 1), s.metals);
-    s.metals -= extract;
+    const P = this.probeCost(s.tech, s.genome.expand);
+    if (!feral && t >= s.nextScan) {
+      s.nextScan = t + 80 + this.rng.next() * 80;
+      // (skip the scan entirely if no feral has existed within light-crossing time)
+      s.alert = (s.genome.coop >= 0.4 && t - this.lastFeralSeen < this.diag) ? this.scanFeral(s) : 0;
+    }
+
+    // What does this colony want matter for right now?
+    const wantProbes = !s.noTargets && s.stock < P;
+    const swarmNeed = this.swarmNeed(s);
+    // better Stellar Engineering shrinks what a full swarm needs; surplus hardware is recycled
+    if (s.swarm > swarmNeed * 1.01) { s.stock += s.swarm - swarmNeed; s.swarm = swarmNeed; }
+    const wantSwarm = !feral && s.swarm < swarmNeed;
+    // defences are built up to a level scaled by how many hostile systems are in view
+    const wantDefense = s.alert > 0 && s.defense < this.defenseTarget(s);
+    // Industry needs INFRA_PER_I tonnes of infrastructure per unit of output.
     const cap = this.industryCap(s);
     const g = 0.0035 * (1 + 0.25 * s.tech[T_FAB]) * (feral ? 1.4 : 1);
-    if (s.metals > 1) s.I += g * s.I * (1 - s.I / cap) * dt;
-    else s.I *= Math.max(0, 1 - 0.002 * dt);
-    if (s.I < 0.05) s.I = 0.05;
+    const wantGrowth = s.I < cap * 0.98;
+    const idle = !wantProbes && !wantSwarm && !wantDefense && !wantGrowth;
 
-    const P = this.probeCost(s.tech);
+    // Mine only what there's a use for. Raw rock first; once that's gone, colonies that
+    // still need probes or defences start dismantling their own swarm.
+    const growthNeed = wantGrowth ? g * s.I * (1 - s.I / cap) * dt * INFRA_PER_I : 0;
+    let budget = (wantProbes || wantSwarm || wantDefense) ? s.I * dt : Math.min(s.I * dt, growthNeed);
+    let extract = Math.min(budget, s.metals);
+    s.metals -= extract;
+    if (extract < budget && s.swarm > 0 && (wantProbes || wantDefense || feral)) {
+      const take = Math.min(budget - extract, s.swarm);
+      s.swarm -= take; extract += take;
+      this.updateDyson(s);
+    }
+
+    // Industry grows toward its cap, but each unit of growth must be built out of matter.
+    if (wantGrowth && extract > 0) {
+      const share = (wantProbes || wantSwarm || wantDefense) ? 0.3 : 1;
+      const dI = Math.min(growthNeed, extract * share) / INFRA_PER_I;
+      if (dI > 0) { s.I += dI; s.infra += dI * INFRA_PER_I; extract -= dI * INFRA_PER_I; }
+    } else if (s.I > cap) s.I = cap;
+    // Without matter coming in, idle industry slowly decays (the hardware stays).
+    if (extract <= 0 && s.metals < 1 && s.swarm <= 0) s.I = Math.max(0.05, s.I * (1 - 0.002 * dt));
 
     if (feral) {
-      s.probeFund += extract;
+      s.stock += extract;
     } else {
-      if (t >= s.nextScan) {
-        s.nextScan = t + 80 + this.rng.next() * 80;
-        // (skip the scan entirely if no feral has existed within light-crossing time)
-        s.alert = (s.genome.coop >= 0.4 && t - this.lastFeralSeen < this.diag) ? this.scanFeral(s) : 0;
-      }
-      let ps = s.noTargets ? 0 : 0.3 + 0.65 * s.genome.expand;
-      if (s.alert > 0) ps = Math.max(ps, 0.7);
-      s.probeFund += extract * ps;
-      let rest = extract * (1 - ps);
-      if (s.alert > 0) { s.defense += rest * 0.5; rest *= 0.5; }
-      if (s.noTargets && s.probeFund > 0) { const leak = s.probeFund * 0.01 * dt; s.probeFund -= leak; rest += leak; }
-      if (s.dyson < 1) {
-        const cost = 40000 * Math.sqrt(s.lum + 0.05) / (1 + 0.3 * s.tech[T_STELLAR]);
-        s.dyson = Math.min(1, s.dyson + rest / cost);
+      let ps = wantProbes ? 0.3 + 0.65 * s.genome.expand : 0;
+      if (wantProbes && s.alert > 0) ps = Math.max(ps, 0.7);
+      let toProbes = extract * ps;
+      let rest = extract - toProbes;
+      if (wantDefense) { s.defense += rest * 0.5; rest *= 0.5; }
+      if (wantSwarm) {
+        const add = Math.min(rest, swarmNeed - s.swarm);
+        s.swarm += add; rest -= add;
+        // a colony with nowhere to expand also pours its saved probe stockpile into the swarm
+        if (s.noTargets && s.stock > 0 && s.swarm < swarmNeed) {
+          const mv = Math.min(s.stock * 0.01 * dt, swarmNeed - s.swarm);
+          s.stock -= mv; s.swarm += mv;
+        }
+        this.updateDyson(s);
         if (s.dyson >= 1 && !this.civs[s.civ].firstDyson) {
           this.civs[s.civ].firstDyson = true;
           this.log(`${this.civs[s.civ].name} completes its first full Dyson swarm around ${s.name}. The star goes dark to outside observers.`, s, 'dyson', this.civs[s.civ].hue);
         }
       }
-      // research runs on captured energy
+      s.stock += toProbes + rest; // anything unallocated stays in the stockpile
+
+      // research runs on captured energy, not matter
       s.research += (0.05 + s.I * 0.01) * this.effEnergy(s) * (1 + 4 * s.dyson) * (idle ? 2 : 1) * dt;
       if (s.research >= this.researchThreshold(s.tech)) {
         s.research -= this.researchThreshold(s.tech);
@@ -663,11 +778,11 @@ export class Sim {
       s.noTargets = !probeT;
       s.noTargetUntil = t + 250 + this.rng.next() * 250;
     }
-    if (!s.noTargets && s.probeFund >= P) {
+    if (!s.noTargets && s.stock >= P) {
       let target = null, kind = 'seed';
       if (!feral && s.alert > 0) { target = this.findHunterTarget(s, s.tech); if (target) kind = 'hunter'; }
       if (!target) target = feral ? this.findFeralTarget(s, s.tech) : this.findSeedTarget(s, s.tech, s.genome.coop);
-      if (target) { s.probeFund -= P; this.launch(s, target, kind); }
+      if (target) this.launch(s, target, kind);
       else { s.noTargets = true; s.noTargetUntil = t + 150 + this.rng.next() * 150; }
     }
   }
@@ -702,6 +817,7 @@ export class Sim {
       const pr = probes[i];
       if (t >= pr.tDie) {
         this.stats.lost++;
+        this.mass.lost += pr.mass;
         this.retire(pr, 'lost');
         probes[i] = probes[probes.length - 1]; probes.pop();
         this.checkExtinct(this.lineages[pr.lin]);
@@ -740,28 +856,29 @@ export class Sim {
   }
 
   sample() {
-    let coop = 0, expand = 0, dy = 0, lumTot = 0, lumCap = 0, metals = 0, metals0 = 0;
+    let coop = 0, expand = 0, dy = 0, lumTot = 0, lumCap = 0;
     const civCounts = this.civs.map(() => 0);
     let feral = 0;
     for (const s of this.stars) {
       lumTot += s.lum; lumCap += s.lum * s.dyson;
-      metals += s.metals; metals0 += s.M0;
       if (s.owner < 0) continue;
       coop += s.genome.coop; expand += s.genome.expand; dy += s.dyson;
       if (this.lineages[s.owner].feral) feral++;
       else civCounts[s.civ]++;
     }
     const n = Math.max(1, this.colonyCount);
-    const mf = metals / metals0;
+    const L = this.massLedger();
+    this.ledger = L;
+    const mf = L.raw / L.total;
     while (this.matterMilestones.length && mf <= this.matterMilestones[0]) {
       const m = this.matterMilestones.shift();
-      this.log(m > 0.05 ? `Only ${Math.round(m * 100)}% of the region's mineable matter remains.`
-        : 'The region is effectively strip-mined. Industry is winding down; only starlight remains.', null, 'milestone', 200);
+      this.log(m > 0.05 ? `Only ${Math.round(m * 100)}% of the region's matter is still unmined rock.`
+        : 'The region\'s rock is effectively strip-mined. What remains is swarms, hardware and rubble.', null, 'milestone', 200);
     }
     this.series.push({
       t: this.t, civCounts, feral, probes: this.probes.length,
       coop: coop / n, expand: expand / n, dyson: dy / n, captured: lumCap / lumTot,
-      metals: metals / metals0,
+      metals: mf, swarmFrac: L.swarm / L.total, exhaustFrac: L.exhaust / L.total,
     });
     if (this.series.length > 1600) this.series = this.series.filter((_, i) => i % 2 === 0);
   }
