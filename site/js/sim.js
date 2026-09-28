@@ -5,9 +5,13 @@
 //    per-colony; it is derived from event timestamps + distance (retarded time).
 //  * Colonies mine their star system, grow industry, build probes, Dyson swarms,
 //    and do research. Breakthroughs propagate through the civilisation at c.
-//  * Replication is imperfect. Genomes drift; strains that lose the "cooperation"
-//    drive go feral and prey on other colonies. Cooperative colonies that see
-//    feral activity (with light lag) arm themselves and send hunter probes.
+//  * Replication is imperfect. Each colony carries a genome: loyalty (cohesion with
+//    its own civilisation), aggression (stance toward other civilisations),
+//    expansion drive, and a protocol dialect. Drift in the dialect eventually makes
+//    a strain unintelligible to its parent: it splinters into a new civilisation
+//    with its own research. Aggressive strains raid other civilisations; strains
+//    that lose loyalty go feral and prey on everyone. Colonies that *see* hostile
+//    conquests nearby (with light lag) arm themselves and send hunters to retake them.
 //  * Massive stars go supernova, sterilising everything the blast front reaches.
 //  * Mass is conserved. Every system holds raw rock, a stockpile, infrastructure,
 //    Dyson swarm hardware and defences; probes carry their payload and braking
@@ -21,14 +25,22 @@ export const T_DRIVE = 0, T_RANGE = 1, T_FAB = 2, T_FID = 3, T_STELLAR = 4;
 const ROMAN = ['0', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII', 'XIII', 'XIV', 'XV', 'XVI', 'XVII', 'XVIII', 'XIX', 'XX'];
 export const roman = (n) => ROMAN[n] || String(n);
 
+const CIV_SYL = ['ar', 've', 'lo', 'min', 'tha', 'sol', 'ke', 'ri', 'on', 'da', 'vu', 'el', 'ny', 'qua', 'zi', 'mor', 'ae', 'is', 'cal', 'dre'];
+const CIV_NOUN = ['Choir', 'Weave', 'Assembly', 'Drift', 'Canon', 'Reach', 'Concord', 'Hive', 'Remnant', 'Accord', 'Schism', 'Tide', 'Mesh', 'Covenant', 'Bloom'];
 const CIV_DEFS = [
   { name: 'Lattice', hue: 190 },
   { name: 'Chorus', hue: 45 },
   { name: 'Seedwright', hue: 280 },
   { name: 'Quiet Tide', hue: 130 },
 ];
-const FERAL_COOP = 0.2;     // below this a strain is feral
-const UNFERAL_COOP = 0.35;  // hysteresis to return
+const FERAL_LOYALTY = 0.2;     // below this a strain is feral
+const UNFERAL_LOYALTY = 0.35;  // hysteresis to return
+const RAID_AGGR = 0.6;         // above this a strain raids other civilisations
+const SCHISM_PROTO = 0.5;      // protocol drift from the civ's dialect that makes a new civ
+// Warships (raiders, hunters) are heavier than seed probes and take longer to build.
+const KIND_MASS = { seed: 1, raid: 3, hunter: 3 };
+const KIND_BUILD = { seed: 1, raid: 8, hunter: 3 };
+const HOSTILE_MEMORY = 3000;   // yr: how long a seen conquest keeps neighbours on alert
 const SN_KILL_R = 45;       // ly
 const COMMS_R = 110;         // how far we bother drawing routine broadcast rings
 const COLONY_STRIDE = 3;
@@ -41,6 +53,8 @@ export const DEFAULT_PARAMS = {
   baseSpeed: 0.03,
   snRate: 1,
   seed: 1,
+  dialectK: 0.1,       // pull toward visible same-civ neighbours per sync
+  dialectNoise: 0.1,   // dialect drift per sync
 };
 
 export class Sim {
@@ -62,6 +76,7 @@ export class Sim {
     this.stats = {
       launched: 0, duplicates: 0, dupLag: 0, dupJump: 0, rerouted: 0, lost: 0, conquests: 0, repelled: 0,
       huntersLaunched: 0, huntKills: 0, sterilized: 0, supernovae: 0, colonized: 0,
+      raids: 0, schisms: 0, dupBorder: 0,
     };
     // Mass ledger: initial + injected == held in systems + in flight + exhaust + lost
     this.mass = { initial: 0, injected: 0, exhaust: 0, lost: 0 };
@@ -83,7 +98,8 @@ export class Sim {
     }).sort((a, b) => a.snTime - b.snTime);
     this.snIdx = 0;
     this.lastFeralOutbreakLog = -1e9;
-    this.lastFeralSeen = -1e9;
+    this.lastHostile = -1e9;
+    this.hostileSites = new Map(); // star id -> last time it became hostile-looking
     this.stepCount = 0;
     this.setupCivs();
   }
@@ -112,7 +128,7 @@ export class Sim {
         id: i, name: def.name, hue: def.hue, origin: star.id,
         tStart: i === 0 ? 0 : Math.round(this.rng.range(500, 6000)),
         started: false, techBase: [0, 0, 0, 0, 0], techEvents: [], maxLevel: [0, 0, 0, 0, 0],
-        colonies: 0, firstDyson: false,
+        colonies: 0, peak: 0, firstDyson: false, proto: 0, protoMean: 0, doctrineAggr: 0.15, parent: -1, announced: true,
       };
       this.civs.push(civ);
     });
@@ -122,22 +138,95 @@ export class Sim {
   // diverged far enough (or crossed the feral line).
   speciate(civ, parentId, genome) {
     const par = this.lineages[parentId];
-    const feralNow = par.feral ? genome.coop < UNFERAL_COOP : genome.coop < FERAL_COOP;
-    if (feralNow === par.feral && Math.abs(genome.coop - par.genome.coop) < 0.12 &&
-        Math.abs(genome.expand - par.genome.expand) < 0.15) return parentId;
+    const feralNow = par.feral ? genome.loyalty < UNFERAL_LOYALTY : genome.loyalty < FERAL_LOYALTY;
+    if (civ === par.civ && feralNow === par.feral && Math.abs(genome.loyalty - par.genome.loyalty) < 0.12 &&
+        Math.abs(genome.expand - par.genome.expand) < 0.15 && Math.abs(genome.aggr - par.genome.aggr) < 0.12) return parentId;
     return this.newLineage(civ, parentId, genome).id;
+  }
+
+  // Dialect: every so often a colony nudges its protocol toward the average of the
+  // same-civ colonies it can see (as of their light), plus drift. Well-connected regions
+  // stay in sync; isolated or peripheral clusters drift together. A colony whose dialect
+  // strays too far from its civilisation's mean can no longer parse its broadcasts:
+  // it joins a nearby splinter that speaks like it, or founds a new one.
+  syncDialect(s) {
+    const { nStart, nIdx, nDist } = this.g;
+    const R = this.rangeOf(s.tech);
+    let sum = 0, n = 0;
+    for (let k = nStart[s.id]; k < nStart[s.id + 1]; k++) {
+      if (nDist[k] > R) break;
+      const o = this.stars[nIdx[k]];
+      if (o.owner < 0 || o.civ !== s.civ) continue;
+      sum += o.genome.proto; n++;
+    }
+    const g = s.genome;
+    g.proto += (n ? this.p.dialectK * (sum / n - g.proto) : 0) + this.rng.normal() * this.p.dialectNoise * Math.pow(0.9, s.tech[T_FID]);
+    const civ = this.civs[s.civ];
+    if (Math.abs(g.proto - civ.protoMean) <= SCHISM_PROTO || civ.colonies < 3) return;
+    // find a splinter nearby that speaks this dialect
+    let join = null;
+    for (let k = nStart[s.id]; k < nStart[s.id + 1]; k++) {
+      if (nDist[k] > R * 1.5) break;
+      const o = this.stars[nIdx[k]];
+      if (o.owner < 0 || o.civ === s.civ) continue;
+      const c = this.civs[o.civ];
+      if (c.parent === s.civ && Math.abs(c.protoMean - g.proto) < SCHISM_PROTO * 0.6) { join = c; break; }
+    }
+    const target = join || this.newCiv(civ, g, s);
+    // colonies adopt some of the splinter's founding doctrine
+    g.aggr = clamp01(0.5 * g.aggr + 0.5 * target.doctrineAggr);
+    this.invalidate(s);
+    const old = this.lineages[s.owner];
+    const nl = this.newLineage(target.id, s.owner, g);
+    old.colonies--; if (old.feral) this.feralColonies--;
+    nl.colonies++; nl.peak = Math.max(nl.peak, nl.colonies); if (nl.feral) this.feralColonies++;
+    civ.colonies--;
+    s.civ = target.id; s.owner = nl.id;
+    target.colonies++; target.peak = Math.max(target.peak, target.colonies);
+    s.history.push({ t: this.t, lin: nl.id, how: 'schism' });
+    s.flash = this.t; s.noTargets = false;
+    this.announceCiv(target, s);
+    this.checkExtinct(old);
+    this.checkCivExtinct(civ);
+  }
+
+  newCiv(parent, genome, star) {
+    const used = this.civs.map((c) => c.hue);
+    let hue = 0, best = -1;
+    for (let k = 0; k < 24; k++) {
+      const h = 30 + this.rng.next() * 300; // keep clear of feral red
+      const dmin = Math.min(...used.map((u) => Math.abs(((h - u) % 360 + 540) % 360 - 180)));
+      if (dmin > best) { best = dmin; hue = h; }
+    }
+    const syl = () => this.rng.pick(CIV_SYL);
+    let root = syl() + syl() + (this.rng.chance(0.4) ? syl() : '');
+    root = root[0].toUpperCase() + root.slice(1);
+    const name = this.rng.chance(0.5) ? `${root} ${this.rng.pick(CIV_NOUN)}` : root;
+    const tech = star && star.tech ? star.tech.slice() : parent.maxLevel.slice();
+    const civ = {
+      id: this.civs.length, name, hue, origin: star ? star.id : parent.origin, parent: parent.id,
+      tStart: this.t, started: true, proto: genome.proto, protoMean: genome.proto,
+      // schisms come with an ideological shift
+      doctrineAggr: clamp01(genome.aggr + this.rng.normal() * 0.25),
+      techBase: tech.slice(), techEvents: [], maxLevel: tech.slice(),
+      colonies: 0, peak: 0, firstDyson: false, firstFeral: false, firstRaid: false, announced: false,
+    };
+    this.civs.push(civ);
+    this.stats.schisms++;
+    return civ;
   }
 
   newLineage(civ, parent, genome) {
     const par = parent >= 0 ? this.lineages[parent] : null;
-    const feral = par && par.feral ? genome.coop < UNFERAL_COOP : genome.coop < FERAL_COOP;
+    const feral = par && par.feral ? genome.loyalty < UNFERAL_LOYALTY : genome.loyalty < FERAL_LOYALTY;
     let hue;
-    if (!par) hue = this.civs[civ].hue;
+    if (!par || par.civ !== civ) hue = this.civs[civ].hue;
     else hue = par.hue + this.rng.normal() * 13;
     const id = this.lineages.length;
     const lin = {
       id, civ, parent, hue, feral, genome: { ...genome }, born: this.t,
       colonies: 0, peak: 0, probes: 0, outbreakLogged: false, extinctLogged: false,
+      raider: !feral && genome.aggr > RAID_AGGR,
       name: `${this.civs[civ].name}-${id.toString(36)}`,
     };
     this.lineages.push(lin);
@@ -147,7 +236,7 @@ export class Sim {
   startCiv(civ) {
     civ.started = true;
     const s = this.stars[civ.origin];
-    const genome = { coop: 0.85, expand: 0.5 };
+    const genome = { loyalty: 0.85, aggr: 0.15, expand: 0.5, proto: 0 };
     const lin = this.newLineage(civ.id, -1, genome);
     this.colonize(s, { lin: lin.id, civ: civ.id, genome, tech: [0, 0, 0, 0, 0] }, true);
     s.I = 6;
@@ -171,6 +260,20 @@ export class Sim {
     for (let i = h.length - 1; i >= 0; i--) if (h[i].t <= time) return h[i].lin;
     return -1;
   }
+  entryAt(s, time) {
+    const h = s.history;
+    for (let i = h.length - 1; i >= 0; i--) if (h[i].t <= time) return h[i];
+    return null;
+  }
+
+  // As seen (at retarded time `tr`) by a colony of lineage `me`: is this entry a hostile
+  // presence? Either a feral strain, or a system recently taken by force by another civ.
+  isHostileEntry(e, me, tr) {
+    if (!e || e.lin < 0 || e.lin === me.id) return false;
+    const o = this.lineages[e.lin];
+    if (o.feral) return true;
+    return e.how === 'conquest' && o.civ !== me.civ && tr - e.t < HOSTILE_MEMORY;
+  }
 
   rangeOf(tech) { return Math.min(MAXR, 32 + 9 * tech[T_RANGE]); }
   speedOf(tech) { return Math.min(0.5, this.p.baseSpeed * Math.pow(1.28, tech[T_DRIVE])); }
@@ -187,6 +290,8 @@ export class Sim {
   probeCost(tech, expand = 0.5) {
     return this.payloadOf(tech) * this.massRatio(this.cruiseSpeed(tech, expand), tech);
   }
+  invalidate(s) { s._P = 0; s._RT = 0; }
+  buildTime(tech) { return 25 * Math.pow(0.9, tech[T_FAB]); }
   defenseTarget(s) { return 1500 + 1200 * Math.min(s.alert, 6) + 20 * s.I; }
   swarmNeed(s) { return 40000 * Math.sqrt(s.lum + 0.05) / (1 + 0.3 * (s.tech ? s.tech[T_STELLAR] : 0)); }
   updateDyson(s) { s.dyson = s.swarm > 0 ? Math.min(1, s.swarm / this.swarmNeed(s)) : 0; }
@@ -217,9 +322,11 @@ export class Sim {
   }
 
   // Would colony at `from` believe `o` has already been claimed (heard intent that it hasn't yet seen fail)?
+  // Claims are only intelligible to colonies sharing the claimant's protocol (civ).
   heardClaim(o, from, d, kindFilter) {
     const t = this.t;
     for (const it of o.intents) {
+      if (it.civ !== from.civ) continue;
       if (kindFilter && it.kind !== kindFilter) continue;
       const src = this.stars[it.origin];
       const dd = src === from ? 0 : Math.hypot(src.x - from.x, src.y - from.y);
@@ -231,7 +338,7 @@ export class Sim {
   countHeard(o, from, d, kind) {
     const t = this.t; let n = 0;
     for (const it of o.intents) {
-      if (it.kind !== kind) continue;
+      if (it.kind !== kind || it.civ !== from.civ) continue;
       const src = this.stars[it.origin];
       const dd = Math.hypot(src.x - from.x, src.y - from.y);
       if (it.t + dd <= t && t - d < it.eta + 250) n++;
@@ -240,11 +347,11 @@ export class Sim {
   }
 
   // ---------------------------------------------------------------- targeting
-  findSeedTarget(from, tech, coop, maxR) {
+  findSeedTarget(from, tech, loyalty, maxR) {
     const { nStart, nIdx, nDist } = this.g;
     const R = Math.min(maxR ?? Infinity, this.rangeOf(tech));
     const t = this.t;
-    const respect = Math.min(1, coop * 2);
+    const respect = Math.min(1, loyalty * 2);
     let best = null, bv = 0;
     for (let k = nStart[from.id]; k < nStart[from.id + 1]; k++) {
       const d = nDist[k];
@@ -257,8 +364,8 @@ export class Sim {
       const v = this.starValue(o) / (1 + d / 22) * (0.7 + 0.6 * this.rng.next());
       if (v > bv) {
         // Protocol: the nearest (perceived) sibling colony has right of claim. Only
-        // cooperative strains follow it, and only as far as their light cone lets them see.
-        if (coop >= 0.5 && from.civ >= 0 && this.siblingCloser(o, from, d)) continue;
+        // loyal strains follow it, and only as far as their light cone lets them see.
+        if (loyalty >= 0.5 && from.civ >= 0 && this.siblingCloser(o, from, d)) continue;
         bv = v; best = o;
       }
     }
@@ -300,35 +407,58 @@ export class Sim {
     return best;
   }
 
-  findHunterTarget(from, tech) {
+  // Raiders go after other civilisations' colonies (as they appeared when their light left).
+  findRaidTarget(from, tech) {
     const { nStart, nIdx, nDist } = this.g;
-    const R = Math.min(MAXR, this.rangeOf(tech) * 1.3);
+    const R = this.rangeOf(tech);
     const t = this.t;
+    let best = null, bv = 0;
     for (let k = nStart[from.id]; k < nStart[from.id + 1]; k++) {
       const d = nDist[k];
       if (d > R) break;
       const o = this.stars[nIdx[k]];
-      const own = this.ownerAt(o, t - d);
-      if (own >= 0 && this.lineages[own].feral) {
-        if (this.countHeard(o, from, d, 'hunter') < 2) return o;
-      }
+      const tr = t - d;
+      if (o.hazardUntil > tr) continue;
+      const own = this.ownerAt(o, tr);
+      if (own < 0 || this.lineages[own].civ === from.civ) continue;
+      const v = (this.starValue(o) + 0.3) / (1 + d / 22) * (0.6 + 0.8 * this.rng.next());
+      if (v > bv) { bv = v; best = o; }
+    }
+    return best;
+  }
+
+  // Hunters retake the nearest system seen to be hostile (feral, or recently conquered by another civ).
+  findHunterTarget(from, tech) {
+    const { nStart, nIdx, nDist } = this.g;
+    const R = Math.min(MAXR, this.rangeOf(tech) * 1.3);
+    const t = this.t;
+    const me = this.lineages[from.owner];
+    for (let k = nStart[from.id]; k < nStart[from.id + 1]; k++) {
+      const d = nDist[k];
+      if (d > R) break;
+      const o = this.stars[nIdx[k]];
+      if (this.isHostileEntry(this.entryAt(o, t - d), me, t - d) && this.countHeard(o, from, d, 'hunter') < 2) return o;
     }
     return null;
   }
 
-  scanFeral(s) {
-    const { nStart, nIdx, nDist } = this.g;
-    const R = Math.min(MAXR, this.rangeOf(s.tech) * 1.5);
+  // Only systems in the hostile index (recently conquered, or ever feral-held) can look
+  // hostile, so scan those rather than every neighbour.
+  scanHostile(s) {
+    const R = Math.min(MAXR, this.rangeOf(s.tech) * 1.5), R2 = R * R;
     const t = this.t;
+    const me = this.lineages[s.owner];
     let n = 0;
-    for (let k = nStart[s.id]; k < nStart[s.id + 1]; k++) {
-      const d = nDist[k];
-      if (d > R) break;
-      const own = this.ownerAt(this.stars[nIdx[k]], t - d);
-      if (own >= 0 && this.lineages[own].feral) n++;
+    for (const id of this.hostileSites.keys()) {
+      const o = this.stars[id];
+      const d2 = (o.x - s.x) ** 2 + (o.y - s.y) ** 2;
+      if (d2 > R2 || o === s) continue;
+      const d = Math.sqrt(d2);
+      if (this.isHostileEntry(this.entryAt(o, t - d), me, t - d)) n++;
     }
     return n;
   }
+  markHostile(s) { this.hostileSites.set(s.id, this.t); this.lastHostile = this.t; }
 
   // ---------------------------------------------------------------- lifecycle
   colonize(s, probe, isOrigin = false) {
@@ -337,6 +467,7 @@ export class Sim {
     s.civ = probe.civ;
     s.genome = { ...probe.genome };
     s.tech = probe.tech.slice();
+    this.invalidate(s);
     s.I = isOrigin ? 6 : 1;
     s.stock = 0;
     // The probe's payload is the seed factory. Any swarm ruins left by a previous
@@ -347,17 +478,20 @@ export class Sim {
     s.colonizedAt = this.t;
     s.alert = 0;
     s.nextScan = this.t + this.rng.range(20, 100);
+    s.nextSync = this.t + this.rng.range(200, 600);
     s.noTargets = false;
     s.noTargetUntil = 0;
     s.launched = 0;
     s.techT = this.t;
     s.flash = this.t;
     s.discoveries = 0;
-    s.history.push({ t: this.t, lin: probe.lin });
+    s.history.push({ t: this.t, lin: probe.lin, how: 'found' });
     lin.colonies++; lin.peak = Math.max(lin.peak, lin.colonies);
-    this.civs[probe.civ].colonies++;
+    const civ = this.civs[probe.civ];
+    civ.colonies++; civ.peak = Math.max(civ.peak, civ.colonies);
+    this.announceCiv(civ, s);
     this.colonyCount++;
-    if (lin.feral) this.feralColonies++;
+    if (lin.feral) { this.feralColonies++; this.markHostile(s); }
     this.stats.colonized++;
     this.rings.push({ x: s.x, y: s.y, t0: this.t, maxR: COMMS_R, kind: 'comm', hue: lin.feral ? 0 : lin.hue });
     this.checkContact(s);
@@ -366,7 +500,7 @@ export class Sim {
       lin.outbreakLogged = true;
       if (this.t - this.lastFeralOutbreakLog > 1500) {
         this.lastFeralOutbreakLog = this.t;
-        this.log(`Feral outbreak: strain ${lin.name} (coop ${lin.genome.coop.toFixed(2)}) now holds ${lin.colonies} systems near ${s.name}.`, s, 'feral', 0);
+        this.log(`Feral outbreak: strain ${lin.name} (loyalty ${lin.genome.loyalty.toFixed(2)}) now holds ${lin.colonies} systems near ${s.name}.`, s, 'feral', 0);
       }
     }
     this.checkMilestone();
@@ -379,23 +513,27 @@ export class Sim {
     this.civs[s.civ].colonies--;
     this.colonyCount--;
     if (lin.feral) this.feralColonies--;
-    s.history.push({ t: this.t, lin: -1 });
+    s.history.push({ t: this.t, lin: -1, how: 'empty' });
+    const civ = this.civs[s.civ];
     s.owner = -1; s.civ = -1; s.I = 0;
     // abandoned hardware becomes rubble; swarm hardware stays in orbit as ruins
     this.toRubble(s, s.stock + s.infra + s.defense);
     s.stock = 0; s.infra = 0; s.defense = 0;
     this.checkExtinct(lin);
+    this.checkCivExtinct(civ);
   }
 
-  transfer(s, probe) {
+  transfer(s, probe, how) {
     // Conquest/liberation: ownership flips, infrastructure mostly retained.
     const oldLin = this.lineages[s.owner];
     const newLin = this.lineages[probe.lin];
-    oldLin.colonies--; this.civs[s.civ].colonies--;
+    const oldCiv = this.civs[s.civ];
+    oldLin.colonies--; oldCiv.colonies--;
     if (oldLin.feral) this.feralColonies--;
     s.owner = probe.lin; s.civ = probe.civ;
     s.genome = { ...probe.genome };
     s.tech = s.tech.map((v, i) => Math.max(v, probe.tech[i]));
+    this.invalidate(s);
     s.research = 0; s.alert = 0;
     // the captor inherits the stockpile, swarm and most infrastructure; the fighting
     // wrecks half the defences and 40% of the industrial base
@@ -404,12 +542,15 @@ export class Sim {
     s.stock += probe.payload ?? 0;
     s.I *= 0.6;
     s.noTargets = false; s.flash = this.t; s.colonizedAt = this.t;
-    s.history.push({ t: this.t, lin: probe.lin });
+    s.history.push({ t: this.t, lin: probe.lin, how });
     newLin.colonies++; newLin.peak = Math.max(newLin.peak, newLin.colonies);
-    this.civs[probe.civ].colonies++;
+    const nc = this.civs[probe.civ];
+    nc.colonies++; nc.peak = Math.max(nc.peak, nc.colonies);
+    if (how === 'conquest' || newLin.feral) this.markHostile(s);
     if (newLin.feral) this.feralColonies++;
-    this.rings.push({ x: s.x, y: s.y, t0: this.t, maxR: COMMS_R * 1.4, kind: newLin.feral ? 'alarm' : 'comm', hue: newLin.feral ? 0 : newLin.hue });
+    this.rings.push({ x: s.x, y: s.y, t0: this.t, maxR: COMMS_R * 1.4, kind: how === 'conquest' ? 'alarm' : 'comm', hue: newLin.feral ? 0 : newLin.hue });
     this.checkExtinct(oldLin);
+    this.checkCivExtinct(oldCiv);
     if (newLin.feral && !newLin.outbreakLogged && newLin.colonies >= 5) {
       newLin.outbreakLogged = true;
       if (this.t - this.lastFeralOutbreakLog > 1500) {
@@ -421,18 +562,18 @@ export class Sim {
 
   driftColony(s) {
     const old = this.lineages[s.owner];
-    const genome = {
-      coop: clamp01(s.genome.coop + this.rng.normal() * 0.1 - 0.03),
-      expand: clamp01(s.genome.expand + this.rng.normal() * 0.06),
-    };
+    const genome = mutate(this.rng, s.genome, 0.8);
+    genome.proto = s.genome.proto; // dialect evolves through syncDialect instead
     s.genome = genome;
+    this.invalidate(s);
     const nid = this.speciate(s.civ, s.owner, genome);
     if (nid === s.owner) return;
     const nl = this.lineages[nid];
     old.colonies--; if (old.feral) this.feralColonies--;
     nl.colonies++; nl.peak = Math.max(nl.peak, nl.colonies); if (nl.feral) this.feralColonies++;
     s.owner = nl.id;
-    s.history.push({ t: this.t, lin: nl.id });
+    s.history.push({ t: this.t, lin: nl.id, how: 'drift' });
+    if (nl.feral) this.markHostile(s);
     s.noTargets = false; s.flash = this.t;
     if (nl.feral && !old.feral) {
       this.rings.push({ x: s.x, y: s.y, t0: this.t, maxR: COMMS_R * 1.4, kind: 'alarm', hue: 0 });
@@ -442,11 +583,34 @@ export class Sim {
     this.checkExtinct(old);
   }
 
+  // Log a new splinter civilisation the first time it holds a system.
+  announceCiv(civ, s) {
+    if (civ.announced || civ.colonies < 5) return; // tiny splinters stay unremarked
+    civ.announced = true;
+    const par = this.civs[civ.parent];
+    this.rings.push({ x: s.x, y: s.y, t0: this.t, maxR: this.diag, kind: 'origin', hue: civ.hue });
+    const stance = civ.doctrineAggr > RAID_AGGR ? 'Its founding doctrine is predatory.' : civ.doctrineAggr > 0.35 ? 'Its founding doctrine is wary.' : 'Its founding doctrine is peaceable.';
+    this.log(`Schism near ${s.name}: a cluster of ${par.name} systems has drifted beyond mutual intelligibility and become ${civ.name}, which can no longer hear ${par.name}'s broadcasts. ${stance}`, s, 'schism', civ.hue);
+  }
+
+  checkCivExtinct(civ) {
+    if (!civ || civ.colonies > 0 || civ.extinct || civ.peak < 10) return;
+    civ.extinct = true;
+    this.log(`${civ.name} is gone: its last system has fallen (peak ${civ.peak} systems).`, null, 'extinct', civ.hue);
+  }
+
+  noteRaid(lin, s, victimCiv) {
+    const civ = this.civs[lin.civ];
+    if (civ.firstRaid) return;
+    civ.firstRaid = true;
+    this.log(`${civ.name} turns predatory: strain ${lin.name} (aggression ${lin.genome.aggr.toFixed(2)}) seizes ${s.name} from ${this.civs[victimCiv].name}.`, s, 'war', civ.hue);
+  }
+
   noteFeral(lin, s) {
     const civ = this.civs[lin.civ];
-    if (!lin.feral || civ.firstFeral) return;
+    if (!lin.feral || civ.firstFeral || civ.colonies < 20) return;
     civ.firstFeral = true;
-    this.log(`${civ.name}'s first feral strain: ${lin.name} at ${s.name} has drifted to cooperation ${lin.genome.coop.toFixed(2)} and turned on its neighbours.`, s, 'feral', 0);
+    this.log(`${civ.name}'s first feral strain: ${lin.name} at ${s.name} has drifted to loyalty ${lin.genome.loyalty.toFixed(2)} and turned on its neighbours.`, s, 'feral', 0);
   }
 
   checkExtinct(lin) {
@@ -462,8 +626,10 @@ export class Sim {
       if (nDist[k] > 60) break;
       const o = this.stars[nIdx[k]];
       if (o.owner >= 0 && o.civ !== s.civ) {
-        const key = Math.min(o.civ, s.civ) * 10 + Math.max(o.civ, s.civ);
-        if (!this.contacts.has(key)) {
+        const a = this.civs[o.civ], b = this.civs[s.civ];
+        const key = Math.min(a.id, b.id) + ':' + Math.max(a.id, b.id);
+        // a splinter is born next to its parent; that's not news
+        if (!this.contacts.has(key) && a.parent !== b.id && b.parent !== a.id) {
           this.contacts.add(key);
           this.log(`First contact: ${this.civs[s.civ].name} and ${this.civs[o.civ].name} frontiers meet at ${s.name}.`, s, 'contact', 60);
         }
@@ -489,16 +655,13 @@ export class Sim {
       const mut = this.p.mutation * Math.pow(0.8, s.tech[T_FID]);
       if (this.rng.next() < mut) {
         // Copy errors are more likely to damage a complex value system than improve it: slight downward bias.
-        genome = {
-          coop: clamp01(s.genome.coop + this.rng.normal() * 0.1 - 0.03),
-          expand: clamp01(s.genome.expand + this.rng.normal() * 0.1),
-        };
+        genome = mutate(this.rng, s.genome, 1);
       }
       linId = this.speciate(civ, s.owner, genome);
     }
     const tech = s.tech.slice();
     const speed = this.cruiseSpeed(tech, s.genome.expand);
-    const payload = this.payloadOf(tech);
+    const payload = this.payloadOf(tech) * KIND_MASS[kind];
     const R = this.massRatio(speed, tech);
     const cost = payload * R;
     s.stock -= cost;
@@ -524,11 +687,12 @@ export class Sim {
     };
     this.probes.push(pr);
     this.lineages[linId].probes++;
-    target.intents.push({ origin: s.id, t, eta: t1, kind });
+    target.intents.push({ origin: s.id, t, eta: t1, kind, civ });
     s.launched++;
     this.stats.launched++;
     if (kind === 'hunter') this.stats.huntersLaunched++;
-    this.rings.push({ x: s.x, y: s.y, t0: t, maxR: COMMS_R * 0.7, kind: 'launch', hue: kind === 'hunter' ? -1 : (this.lineages[linId].feral ? 0 : lin0.hue) });
+    if (kind === 'raid') this.stats.raids++;
+    this.rings.push({ x: s.x, y: s.y, t0: t, maxR: COMMS_R * 0.7, kind: 'launch', hue: kind === 'hunter' ? -1 : (this.lineages[linId].feral ? 0 : this.lineages[linId].hue) });
   }
 
   retire(pr, fate) {
@@ -546,10 +710,11 @@ export class Sim {
     pr.mass = pr.payload;
     if (s.hazardUntil > t) { this.stats.lost++; this.toRubble(s, pr.payload); return; }
     if (pr.kind === 'hunter') {
-      if (s.owner >= 0 && this.lineages[s.owner].feral) {
-        const atk = 4 + 0.6 * pr.tech[T_FAB];
+      const e = s.history.length ? s.history[s.history.length - 1] : null;
+      if (s.owner >= 0 && this.isHostileEntry(e, lin, t)) {
+        const atk = 6 + 0.6 * pr.tech[T_FAB];
         const def = 1 + s.I * 0.04 + s.defense / 300;
-        if (this.rng.next() < atk / (atk + def)) { this.transfer(s, pr); this.stats.huntKills++; }
+        if (this.rng.next() < atk / (atk + def)) { this.transfer(s, pr, 'liberate'); this.stats.huntKills++; }
         else this.repel(s, pr);
       } else if (s.owner < 0) {
         this.colonize(s, pr);
@@ -564,7 +729,20 @@ export class Sim {
       const def = 1 + s.defense / 250 + s.I * (tgtFeral ? 0.04 : 0.015);
       if (this.rng.next() < atk / (atk + def)) {
         this.stats.conquests++;
-        this.transfer(s, pr);
+        this.transfer(s, pr, 'conquest');
+      } else this.repel(s, pr);
+      return;
+    }
+    if (pr.kind === 'raid') {
+      if (s.owner < 0) { this.colonize(s, pr); return; }
+      if (s.civ === pr.civ) { this.salvage(s, pr); return; }
+      const atk = 5 + 0.5 * pr.tech[T_FAB];
+      const def = 1 + s.defense / 250 + s.I * 0.015;
+      if (this.rng.next() < atk / (atk + def)) {
+        this.stats.conquests++;
+        const victim = s.civ;
+        this.transfer(s, pr, 'conquest');
+        this.noteRaid(lin, s, victim);
       } else this.repel(s, pr);
       return;
     }
@@ -573,9 +751,11 @@ export class Sim {
     // Duplicate arrival — someone got here first (light lag, or a claim we ignored)
     if (!pr.rerouted) {
       this.stats.duplicates++;
-      if (pr.genome.coop < 0.5) this.stats.dupJump++; else this.stats.dupLag++;
+      if (pr.genome.loyalty < 0.5) this.stats.dupJump++;
+      else if (s.civ !== pr.civ) this.stats.dupBorder++;
+      else this.stats.dupLag++;
     }
-    const alt = this.findSeedTarget(s, pr.tech, pr.genome.coop, this.rangeOf(pr.tech) * 0.6);
+    const alt = this.findSeedTarget(s, pr.tech, pr.genome.loyalty, this.rangeOf(pr.tech) * 0.6);
     if (alt && alt !== s) {
       this.stats.rerouted++;
       this.retire(pr, 'arrive');
@@ -589,7 +769,7 @@ export class Sim {
       if (this.rng.next() > Math.exp(-0.0004 * d)) np.tDie = t + this.rng.next() * (np.t1 - t);
       this.probes.push(np);
       this.lineages[np.lin].probes++;
-      alt.intents.push({ origin: s.id, t, eta: np.t1, kind: 'seed' });
+      alt.intents.push({ origin: s.id, t, eta: np.t1, kind: 'seed', civ: np.civ });
       return 'rerouted';
     }
     this.salvage(s, pr);
@@ -619,10 +799,10 @@ export class Sim {
       if (ev.level <= s.tech[ev.track]) continue;
       if (this.t >= ev.t + Math.hypot(ev.x - s.x, ev.y - s.y)) { s.tech[ev.track] = ev.level; changed = true; }
     }
-    if (changed) s.flash = this.t;
+    if (changed) { s.flash = this.t; this.invalidate(s); }
   }
 
-  breakthrough(s) {
+  breakthrough(s, share = true) {
     const civ = this.civs[s.civ];
     // research the weakest track, with some randomness
     let track = 0, bv = Infinity;
@@ -633,6 +813,7 @@ export class Sim {
     const level = s.tech[track] + 1;
     s.tech[track] = level;
     s.discoveries++;
+    if (!share) return; // hoarded
     civ.techEvents.push({ x: s.x, y: s.y, t: this.t, track, level, sid: s.id });
     if (level > civ.maxLevel[track]) {
       civ.maxLevel[track] = level;
@@ -695,18 +876,25 @@ export class Sim {
       this.driftColony(s);
       lin = this.lineages[s.owner];
     }
+    if (t >= s.nextSync) {
+      s.nextSync = t + 300 + this.rng.next() * 300;
+      this.syncDialect(s);
+      lin = this.lineages[s.owner];
+    }
     const feral = lin.feral;
     if (t >= s.techT) { this.refreshTech(s); s.techT = t + 30 + this.rng.next() * 30; }
 
-    const P = this.probeCost(s.tech, s.genome.expand);
+    // cached; invalidated whenever tech or genome changes (see invalidate())
+    const P = s._P || (s._P = this.probeCost(s.tech, s.genome.expand));
     if (!feral && t >= s.nextScan) {
       s.nextScan = t + 80 + this.rng.next() * 80;
-      // (skip the scan entirely if no feral has existed within light-crossing time)
-      s.alert = (s.genome.coop >= 0.4 && t - this.lastFeralSeen < this.diag) ? this.scanFeral(s) : 0;
+      // Arm up only on *seen* hostility: ferals, or conquests by other civs within view.
+      // (skip the scan entirely if nothing hostile has happened within light-crossing time)
+      s.alert = (s.genome.loyalty >= 0.4 && t - this.lastHostile < this.diag + HOSTILE_MEMORY) ? this.scanHostile(s) : 0;
     }
 
     // What does this colony want matter for right now?
-    const wantProbes = !s.noTargets && s.stock < P;
+    const wantProbes = !s.noTargets && s.stock < P * (s.alert > 0 || lin.raider ? KIND_MASS.raid : 1);
     const swarmNeed = this.swarmNeed(s);
     // better Stellar Engineering shrinks what a full swarm needs; surplus hardware is recycled
     if (s.swarm > swarmNeed * 1.01) { s.stock += s.swarm - swarmNeed; s.swarm = swarmNeed; }
@@ -757,34 +945,52 @@ export class Sim {
           s.stock -= mv; s.swarm += mv;
         }
         this.updateDyson(s);
-        if (s.dyson >= 1 && !this.civs[s.civ].firstDyson) {
+        if (s.dyson >= 1 && !this.civs[s.civ].firstDyson && this.civs[s.civ].parent < 0) {
           this.civs[s.civ].firstDyson = true;
           this.log(`${this.civs[s.civ].name} completes its first full Dyson swarm around ${s.name}. The star goes dark to outside observers.`, s, 'dyson', this.civs[s.civ].hue);
         }
       }
       s.stock += toProbes + rest; // anything unallocated stays in the stockpile
-
-      // research runs on captured energy, not matter
-      s.research += (0.05 + s.I * 0.01) * this.effEnergy(s) * (1 + 4 * s.dyson) * (idle ? 2 : 1) * dt;
-      if (s.research >= this.researchThreshold(s.tech)) {
-        s.research -= this.researchThreshold(s.tech);
-        this.breakthrough(s);
-      }
+    }
+    // Research runs on captured energy, not matter. Ferals research too, but only for
+    // themselves: they never broadcast what they learn.
+    s.research += (0.05 + s.I * 0.01) * this.effEnergy(s) * (1 + 4 * s.dyson) * (idle ? 2 : 1) * dt;
+    const RT = s._RT || (s._RT = this.researchThreshold(s.tech));
+    if (s.research >= RT) {
+      s.research -= RT;
+      this.breakthrough(s, !feral);
+      this.invalidate(s);
     }
 
     // probe construction / launch
     if (s.noTargets && t >= s.noTargetUntil) {
-      const probeT = feral ? this.findFeralTarget(s, s.tech) : (s.alert > 0 && this.findHunterTarget(s, s.tech)) || this.findSeedTarget(s, s.tech, s.genome.coop);
-      s.noTargets = !probeT;
+      s.noTargets = !this.chooseTarget(s, lin, feral);
       s.noTargetUntil = t + 250 + this.rng.next() * 250;
     }
-    if (!s.noTargets && s.stock >= P) {
-      let target = null, kind = 'seed';
-      if (!feral && s.alert > 0) { target = this.findHunterTarget(s, s.tech); if (target) kind = 'hunter'; }
-      if (!target) target = feral ? this.findFeralTarget(s, s.tech) : this.findSeedTarget(s, s.tech, s.genome.coop);
-      if (target) this.launch(s, target, kind);
-      else { s.noTargets = true; s.noTargetUntil = t + 150 + this.rng.next() * 150; }
+    // shipyards have finite throughput: one probe per build time
+    if (!s.noTargets && s.stock >= P && t >= (s.nextBuild || 0)) {
+      const pick = this.chooseTarget(s, lin, feral);
+      if (pick) {
+        if (s.stock >= P * KIND_MASS[pick.kind]) {
+          this.launch(s, pick.target, pick.kind);
+          s.nextBuild = t + this.buildTime(s.tech) * KIND_BUILD[pick.kind];
+        } else s.nextBuild = t + 20; // still saving up for a warship
+      } else { s.noTargets = true; s.noTargetUntil = t + 150 + this.rng.next() * 150; }
     }
+  }
+
+  // Priorities: defend (hunters) > expand into free space > raid other civs (raiders only;
+  // more aggressive strains raid even while free space remains). Ferals take anything.
+  chooseTarget(s, lin, feral) {
+    if (feral) { const f = this.findFeralTarget(s, s.tech); return f && { target: f, kind: 'seed' }; }
+    if (s.alert > 0) { const h = this.findHunterTarget(s, s.tech); if (h) return { target: h, kind: 'hunter' }; }
+    if (lin.raider && this.rng.next() < (s.genome.aggr - RAID_AGGR) * 1.5) {
+      const r = this.findRaidTarget(s, s.tech); if (r) return { target: r, kind: 'raid' };
+    }
+    const seed = this.findSeedTarget(s, s.tech, s.genome.loyalty);
+    if (seed) return { target: seed, kind: 'seed' };
+    if (lin.raider) { const r = this.findRaidTarget(s, s.tech); if (r) return { target: r, kind: 'raid' }; }
+    return null;
   }
 
   // ---------------------------------------------------------------- main step
@@ -808,7 +1014,7 @@ export class Sim {
       const s = stars[i];
       if (s.owner >= 0 && s.colonizedAt < t) this.stepColony(s, cdt);
     }
-    if (this.feralColonies > 0) this.lastFeralSeen = t;
+    if (this.feralColonies > 0) this.lastHostile = t;
     this.stepCount++;
 
     // probes
@@ -836,6 +1042,13 @@ export class Sim {
 
   housekeep() {
     const t = this.t;
+    const sum = new Float64Array(this.civs.length), cnt = new Float64Array(this.civs.length);
+    for (const s of this.stars) if (s.owner >= 0) { sum[s.civ] += s.genome.proto; cnt[s.civ]++; }
+    for (const c of this.civs) if (cnt[c.id]) c.protoMean = sum[c.id] / cnt[c.id];
+    for (const [id, th] of this.hostileSites) {
+      const o = this.stars[id];
+      if (t - th > HOSTILE_MEMORY + MAXR && !(o.owner >= 0 && this.lineages[o.owner].feral)) this.hostileSites.delete(id);
+    }
     for (const civ of this.civs) {
       const keep = [];
       for (const ev of civ.techEvents) {
@@ -856,13 +1069,13 @@ export class Sim {
   }
 
   sample() {
-    let coop = 0, expand = 0, dy = 0, lumTot = 0, lumCap = 0;
+    let loyalty = 0, aggr = 0, expand = 0, dy = 0, lumTot = 0, lumCap = 0;
     const civCounts = this.civs.map(() => 0);
     let feral = 0;
     for (const s of this.stars) {
       lumTot += s.lum; lumCap += s.lum * s.dyson;
       if (s.owner < 0) continue;
-      coop += s.genome.coop; expand += s.genome.expand; dy += s.dyson;
+      loyalty += s.genome.loyalty; aggr += s.genome.aggr; expand += s.genome.expand; dy += s.dyson;
       if (this.lineages[s.owner].feral) feral++;
       else civCounts[s.civ]++;
     }
@@ -877,7 +1090,7 @@ export class Sim {
     }
     this.series.push({
       t: this.t, civCounts, feral, probes: this.probes.length,
-      coop: coop / n, expand: expand / n, dyson: dy / n, captured: lumCap / lumTot,
+      loyalty: loyalty / n, aggr: aggr / n, expand: expand / n, dyson: dy / n, captured: lumCap / lumTot,
       metals: mf, swarmFrac: L.swarm / L.total, exhaustFrac: L.exhaust / L.total,
     });
     if (this.series.length > 1600) this.series = this.series.filter((_, i) => i % 2 === 0);
@@ -885,3 +1098,14 @@ export class Sim {
 }
 
 function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+// Copy errors are more likely to damage a complex value system than improve it, so
+// loyalty drifts slightly downward; the other genes (and the dialect) random-walk.
+function mutate(rng, g, k) {
+  return {
+    loyalty: clamp01(g.loyalty + rng.normal() * 0.1 * k - 0.03 * k),
+    aggr: clamp01(g.aggr + rng.normal() * 0.08 * k),
+    expand: clamp01(g.expand + rng.normal() * 0.1 * k),
+    proto: g.proto + rng.normal() * 0.05 * k,
+  };
+}

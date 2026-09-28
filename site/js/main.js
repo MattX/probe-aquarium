@@ -15,7 +15,7 @@ let sim = null;
 let playing = true;
 let acc = 0;
 let selected = null, hover = null, observer = null;
-let viewMode = 'lineage';
+let viewMode = 'civ';
 let lastLogKey = '';
 let effRate = 0, rateWindow = { t: performance.now(), years: 0 };
 
@@ -144,9 +144,12 @@ function updateUI(force) {
     ['Duplicate arrivals', `${fmt(st.duplicates)} <span class="muted">(${fmt(st.rerouted)} rerouted)</span>`, 'duplicates'],
     ['&nbsp;· from light lag', fmt(st.dupLag), 'dupLag'],
     ['&nbsp;· from claim-jumping', fmt(st.dupJump), 'dupJump'],
+    ['&nbsp;· at borders', fmt(st.dupBorder), 'dupBorder'],
     ['Lost in transit', fmt(st.lost), 'lost'],
+    ['Civilisations', `${fmt(sim.civs.filter((c) => c.colonies > 0).length)} <span class="muted">(${fmt(st.schisms)} schisms)</span>`, 'civsStat'],
     ['Living strains', `${fmt(linAlive)}`, 'strains'],
     ['Feral systems', `${fmt(sim.feralColonies)} <span class="muted">(${feralLin} strains)</span>`, 'feral', sim.feralColonies > 0 ? 'feral' : ''],
+    ['Raids launched', fmt(st.raids), 'raids'],
     ['Conquests / repelled', `${fmt(st.conquests)} / ${fmt(st.repelled)}`, 'conquests'],
     ['Hunters sent / kills', `${fmt(st.huntersLaunched)} / ${fmt(st.huntKills)}`, 'hunters'],
     ['Supernovae / sterilised', `${fmt(st.supernovae)} / ${fmt(st.sterilized)}`, 'supernovae'],
@@ -167,21 +170,30 @@ function updateUI(force) {
     <div class="masslegend">${segs.map(([n, v, c, tip]) => `<span data-tip="${attr(tip)}"><i style="background:${c}"></i>${n} ${pct(v / L.total, v / L.total < 0.1 ? 1 : 0)}</span>`).join('')}</div>`;
   $('stats').innerHTML = rows.map(([k, v, tip, cls]) => `<div class="k"${tip ? ` data-tip="${attr(TIPS[tip])}"` : ''}>${k}</div><div class="v ${cls || ''}">${v}</div>`).join('') + `<div class="full">${massBar}</div>`;
 
-  // civs
+  // civs: the originals plus the largest splinters
   const civN = sim.civs.map(() => ({ ok: 0, feral: 0 }));
   for (const s of sim.stars) if (s.owner >= 0) {
     if (sim.lineages[s.owner].feral) civN[s.civ].feral++; else civN[s.civ].ok++;
   }
-  $('civs').innerHTML = sim.civs.map((c, i) => {
+  const alive = sim.civs.filter((c) => !c.started || c.colonies > 0);
+  alive.sort((a, b) => (civN[b.id].ok + civN[b.id].feral) - (civN[a.id].ok + civN[a.id].feral) || a.id - b.id);
+  const shown = alive.slice(0, 8);
+  const rest = alive.slice(8);
+  $('civs').innerHTML = shown.map((c) => {
+    const i = c.id;
     const col = rgb(hslToRgb(c.hue, 0.8, 0.58));
     const status = !c.started ? `<span class="muted">awakens in ${fmt(c.tStart - sim.t)} yr</span>` :
       `${fmt(civN[i].ok)}${civN[i].feral ? ` <span style="color:var(--feral)">+${fmt(civN[i].feral)} feral</span>` : ''}`;
     const tech = TRACKS.map((tn, k) => `<span data-tip="${attr(TECH_TIPS[k] + '<br><br>' + TIPS.civTech)}">${tn.split(' ')[0].slice(0, 5)} ${roman(c.maxLevel[k])}</span>`).join(' · ');
+    const origin = c.parent >= 0
+      ? `<span class="muted" data-tip="${attr(TIPS.splinter)}">splinter of ${sim.civs[c.parent].name}, yr ${fmt(c.tStart)} · ${doctrine(c.doctrineAggr)}</span>`
+      : `<span class="muted">origin civilisation</span>`;
     return `<div class="civ"><div class="sw" style="background:${col}"></div><div class="nm">${c.name}</div><div class="n">${status}</div>
-      <div class="tech">${tech}</div></div>`;
-  }).join('');
-  $('chartLegend').innerHTML = sim.civs.map((c) => `<span style="color:${rgb(hslToRgb(c.hue, 0.8, 0.6))}">${c.name}</span>`).join('') +
-    `<span style="color:var(--feral)">feral</span>`;
+      <div class="tech">${origin}</div><div class="tech">${tech}</div></div>`;
+  }).join('') + (rest.length ? `<p class="muted small" data-tip="${attr(TIPS.minorCivs)}">+ ${rest.length} minor civilisations holding ${fmt(rest.reduce((n, c) => n + c.colonies, 0))} systems</p>` : '');
+  chartCivs = alive.filter((c) => c.started).slice(0, 6);
+  $('chartLegend').innerHTML = chartCivs.map((c) => `<span style="color:${rgb(hslToRgb(c.hue, 0.8, 0.6))}">${c.name}</span>`).join('') +
+    (alive.length > chartCivs.length ? `<span class="muted">others</span>` : '') + `<span style="color:var(--feral)">feral</span>`;
 
   drawCharts();
   renderLog(force);
@@ -189,6 +201,8 @@ function updateUI(force) {
   refreshTip();
 }
 
+let chartCivs = [];
+const doctrine = (a) => a > 0.6 ? 'predatory doctrine' : a > 0.35 ? 'wary doctrine' : 'peaceable doctrine';
 const attr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 const tipAttr = (key) => ` data-tip="${attr(TIPS[key])}"`;
 
@@ -209,10 +223,17 @@ function drawCharts() {
   const X = (t) => (t - tMin) / Math.max(1, tMax - tMin) * W;
   const N = sim.stars.length;
   // stacked area
-  const layers = sim.civs.map((c) => rgb(hslToRgb(c.hue, 0.75, 0.55), 0.85)).concat(['rgba(255,70,55,0.9)']);
+  // the biggest civs individually, everyone else as one grey band, ferals on top
+  const ids = chartCivs.map((c) => c.id);
+  const idSet = new Set(ids);
+  const layers = chartCivs.map((c) => rgb(hslToRgb(c.hue, 0.75, 0.55), 0.85)).concat(['rgba(150,160,190,0.55)', 'rgba(255,70,55,0.9)']);
   const base = new Float32Array(s.length);
   for (let L = 0; L < layers.length; L++) {
-    const vals = s.map((p) => L < sim.civs.length ? p.civCounts[L] : p.feral);
+    const vals = s.map((p) => {
+      if (L < ids.length) return p.civCounts[ids[L]] || 0;
+      if (L === ids.length) { let o = 0; p.civCounts.forEach((v, j) => { if (!idSet.has(j)) o += v; }); return o; }
+      return p.feral;
+    });
     x1.beginPath();
     for (let i = 0; i < s.length; i++) x1.lineTo(X(s[i].t), H1 - (base[i] + vals[i]) / N * H1);
     for (let i = s.length - 1; i >= 0; i--) x1.lineTo(X(s[i].t), H1 - base[i] / N * H1);
@@ -232,7 +253,8 @@ function drawCharts() {
   line('metals', '#9ad0a0');
   line('captured', '#ff7a59');
   line('expand', '#ffc857');
-  line('coop', '#6cb4ff');
+  line('aggr', '#d27cff');
+  line('loyalty', '#6cb4ff');
   x1.fillStyle = x2.fillStyle = 'rgba(200,210,240,0.6)';
   x1.font = x2.font = '20px ui-monospace, monospace';
   x1.fillText(`${fmt(tMax)} yr`, W - 150, 22);
@@ -296,13 +318,13 @@ function renderInspector() {
     const origin = sim.stars[civ.origin];
     const dOrigin = Math.hypot(origin.x - s.x, origin.y - s.y);
     const thr = sim.researchThreshold(s.tech);
-    h += `<div class="row"><b style="color:${col}">${lin.feral ? 'FERAL ' : ''}strain ${lin.name}</b> <span class="muted">· ${civ.name}</span></div>
-      <div class="row"><span class="gene"${tipAttr('iCoop')}>coop ${s.genome.coop.toFixed(2)}</span><span class="gene"${tipAttr('iExpand')}>expand ${s.genome.expand.toFixed(2)}</span></div>
+    h += `<div class="row"><b style="color:${col}">${lin.feral ? 'FERAL ' : ''}strain ${lin.name}</b> <span class="muted">· ${civ.name}${civ.parent >= 0 ? ` (splinter of ${sim.civs[civ.parent].name})` : ''}</span></div>
+      <div class="row"><span class="gene"${tipAttr('iLoyalty')}>loyalty ${s.genome.loyalty.toFixed(2)}</span><span class="gene"${tipAttr('iAggr')}>aggression ${s.genome.aggr.toFixed(2)}</span><span class="gene"${tipAttr('iExpand')}>expand ${s.genome.expand.toFixed(2)}</span><span class="gene"${tipAttr('iDialect')}>dialect ${(s.genome.proto - civ.protoMean >= 0 ? '+' : '')}${(s.genome.proto - civ.protoMean).toFixed(2)}</span></div>
       <div class="stats" style="margin-top:6px">
       <div class="k"${tipAttr('iFounded')}>Founded</div><div class="v">year ${fmt(s.colonizedAt)} <span class="muted">(${fmt(t - s.colonizedAt)} yr ago)</span></div>
       <div class="k"${tipAttr('iIndustry')}>Industry</div><div class="v">${s.I.toFixed(1)} <span class="muted">/ ${sim.industryCap(s).toFixed(0)} u/yr</span></div>
       <div class="k"${tipAttr('iLaunched')}>Probes launched</div><div class="v">${fmt(s.launched)}</div>
-      <div class="k"${tipAttr('iStatus')}>Status</div><div class="v">${lin.feral ? '<span style="color:var(--feral)">raiding</span>' : s.metals < 1 && s.swarm < 1 ? '<span class="muted">exhausted — no matter left</span>' : s.alert > 0 ? `<span style="color:#ffb46a">on alert — sees ${s.alert} feral system${s.alert > 1 ? 's' : ''}</span>` : s.noTargets ? (s.dyson >= 1 ? 'computing (idle)' : 'building swarm') : 'expanding'}</div>
+      <div class="k"${tipAttr('iStatus')}>Status</div><div class="v">${lin.feral ? '<span style="color:var(--feral)">feral — preys on everyone</span>' : s.metals < 1 && s.swarm < 1 ? '<span class="muted">exhausted — no matter left</span>' : s.alert > 0 ? `<span style="color:#ffb46a">on alert — sees ${s.alert} feral system${s.alert > 1 ? 's' : ''}</span>` : s.noTargets ? (s.dyson >= 1 ? 'computing (idle)' : 'building swarm') : lin.raider ? '<span style="color:#d27cff">predatory — raids other civs</span>' : 'expanding'}</div>
       <div class="k"${tipAttr('iRange')}>Probe range / speed</div><div class="v">${sim.rangeOf(s.tech).toFixed(0)} ly / ${sim.cruiseSpeed(s.tech, s.genome.expand).toFixed(3)} c</div>
       <div class="k"${tipAttr('iProbeCost')}>Probe cost</div><div class="v">${fmt(sim.probeCost(s.tech, s.genome.expand))} <span class="muted">(${fmt(sim.payloadOf(s.tech))} payload, ratio ${sim.massRatio(sim.cruiseSpeed(s.tech, s.genome.expand), s.tech).toFixed(1)})</span></div>
       <div class="k"${tipAttr('iOrigin')}>Origin (${origin.name})</div><div class="v">${fmt(dOrigin)} ly — news ${fmt(dOrigin)} yr old</div>
@@ -501,10 +523,13 @@ function renderModeLegend() {
   const el = $('modeLegend');
   const tip = VIEW_TIPS[viewMode];
   let bar = '';
-  if (viewMode === 'coop') {
+  if (viewMode === 'aggr') {
+    const stops = [0, 0.25, 0.5, 0.75, 1].map((a) => rgb(hslToRgb(170 + a * 140, 0.8, 0.35 + a * 0.3))).join(',');
+    bar = `<div class="ramp" style="background:linear-gradient(90deg,${stops})"></div><div class="ends"><span>0 peaceable</span><span>raids above 0.6</span><span>1</span></div>`;
+  } else if (viewMode === 'loyalty') {
     const stops = [0, 0.25, 0.5, 0.75, 1].map((c) => rgb(hslToRgb(c * 215, 0.85, 0.55))).join(',');
     bar = `<div class="ramp" style="background:linear-gradient(90deg,${stops})"></div><div class="ends"><span>0 (feral &lt; 0.2)</span><span>1</span></div>`;
-  } else if (viewMode !== 'lineage' && viewMode !== 'civ') {
+  } else if (viewMode !== 'lineage' && viewMode !== 'civ' && viewMode !== 'aggr') {
     const stops = [0, 0.25, 0.5, 0.75, 1].map((c) => rgb(ramp(c))).join(',');
     const ends = { expand: ['0', '1'], tech: ['0 levels', '50'], age: ['old', 'new'], dyson: ['0%', '100%'], matter: ['mined out', 'untouched'] }[viewMode];
     bar = `<div class="ramp" style="background:linear-gradient(90deg,${stops})"></div><div class="ends"><span>${ends[0]}</span><span>${ends[1]}</span></div>`;

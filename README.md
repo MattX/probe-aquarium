@@ -14,14 +14,18 @@ Plain HTML + canvas + ES modules, no build step. Everything lives in `site/`.
   Launch intents and foundings are broadcast at *c*; cooperative strains follow a "nearest visible colony has the
   right of claim" protocol. The **light-cone view** renders the galaxy exactly as one colony sees it, including
   probes at their retarded positions.
-- **Economy** — each colony mines finite matter, grows industry toward a starlight-limited cap, and splits output between
-  probes and a Dyson swarm. Swarms dim the star (it glows infrared), boost energy, and power research. Colonies with
-  nowhere left to expand throttle mining and compute. The region can be strip-mined.
+- **Economy (mass-conserving)** — each system holds raw rock, a stockpile, infrastructure, Dyson swarm hardware and
+  defences. Colonies mine only what they need, industry growth is built from mined matter, and probes obey the rocket
+  equation (mass ratio e^(2v/v_exhaust)), so speed costs propellant. Wreckage falls back as rubble; the only losses are
+  exhaust and probes destroyed in transit, the only source is supernova ejecta. `Sim.massLedger()` balances to ~1e-13.
 - **Research** — five tech tracks (Drive, Range, Fabrication, Fidelity, Stellar Engineering). Each colony researches
   alone; breakthroughs spread as lightspeed wavefronts through the civilisation.
-- **Evolution** — replication copy errors and slow value drift change each colony's *cooperation* and *expansion*
-  genes. Low-cooperation strains jump claims; below a threshold they go **feral**, pouring everything into probes and
-  conquering other colonies. Cooperative colonies that *see* feral activity arm up and send hunter probes.
+- **Evolution, schisms and war** — every colony carries loyalty (cohesion with its civ), aggression (stance toward
+  other civs), expansion drive and a protocol dialect. Dialects are kept in sync with visible same-civ neighbours, so
+  isolated regions drift together until they can no longer parse the parent's broadcasts and **splinter** into a new
+  civilisation with its own research and founding doctrine. Claims are only intelligible within a civ. Aggressive
+  strains raid other civs with heavy warships; low-loyalty strains go **feral** and prey on everyone. Colonies that
+  *see* hostility (with light lag) arm up and send hunters to retake conquered systems.
 - **Hazards** — dust destroys probes in transit; O/B stars go supernova, and the blast front sterilises everything
   within ~45 ly as it expands at *c*, leaving enriched debris to be recolonised.
 

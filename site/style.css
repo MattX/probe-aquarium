@@ -76,6 +76,9 @@ body.panel-hidden #panel { display: none; }
 #log .ev.feral .m { color: #ff8a7e; }
 #log .ev.sn .m, #log .ev.snreport .m { color: #ffc28a; }
 #log .ev.contain .m { color: #9ce0b0; }
+#log .ev.schism .m { color: #b9d7ff; }
+#log .ev.war .m { color: #e3a6ff; }
+#log .ev.extinct .m { color: #c9b39a; }
 .settings { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
 .settings label { display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; color: var(--muted); }
 .settings input { width: 100%; }
